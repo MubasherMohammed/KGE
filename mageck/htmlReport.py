@@ -1643,10 +1643,17 @@ class MAGeCKHTMLReport:
 
             # MLE Gene Summary Table (before volcanos so table_id is available)
             tid = 'mle-' + os.path.basename(self.output_prefix).replace(' ', '_')
-            lp_id = 'lineplot-mle' if has_counts else ''
+            mle_lp_ids = []
+            if has_counts:
+                for cond in self.mle_conditions:
+                    mle_lp_ids.append('lineplot-mle-' + cond.replace(' ', '_'))
+                default_genes = self._get_default_genes_mle()
+                for _lp in mle_lp_ids:
+                    self._default_genes[_lp] = default_genes
+            combined_lp = ','.join(mle_lp_ids)
 
-            # Per-condition: volcano + enrichment
-            for cond in self.mle_conditions:
+            # Per-condition: volcano + line plot + enrichment
+            for ci_idx, cond in enumerate(self.mle_conditions):
                 sample_name = self._condition_to_sample(cond)
                 cond_label = cond + ' vs ' + baseline_name
                 html.append('<h4>' + cond_label + '</h4>')
@@ -1663,12 +1670,27 @@ class MAGeCKHTMLReport:
                 enr_dep_div = self._next_id('enr')
                 enr_enr_div = self._next_id('enr')
 
-                # Volcano — linked to shared MLE table
+                # Volcano + sgRNA line plot side by side
+                html.append('<div class="plot-grid">')
+                html.append('<div>')
+                html.append('<h5>Volcano Plot</h5>')
                 html.append(_desc_html('mle_volcano'))
                 v = self.plot_mle_volcano(cond, table_id=tid,
                                           enr_dep_div=enr_dep_div, enr_enr_div=enr_enr_div)
                 if v:
                     html.append(v)
+                html.append('</div>')
+                if has_counts and ci_idx < len(mle_lp_ids):
+                    cond_lp = mle_lp_ids[ci_idx]
+                    html.append('<div>')
+                    html.append('<h5>sgRNA log2 Fold Change '
+                                '<button class="download-btn-sm" onclick="clearLP(\'' + combined_lp + '\')" '
+                                'style="margin-left:10px;">Clear Selection</button></h5>')
+                    html.append(_desc_html('sgrna_line'))
+                    html.append('<div id="' + cond_lp + '" class="plotly-chart" style="height:380px;"></div>')
+                    html.append('<script>Plotly.newPlot("' + cond_lp + '",[],{title:{text:"Loading default genes..."},xaxis:{title:"Sample"},yaxis:{title:"log2 Fold Change",zeroline:true},height:380},' + _PLOTLY_CONFIG + ');</script>')
+                    html.append('</div>')
+                html.append('</div>')
 
                 # Enrichment (side by side: depleted + enriched)
                 if not self.skip_enrichment and HAS_DECOUPLER:
@@ -1699,22 +1721,10 @@ class MAGeCKHTMLReport:
                         html.append('</div>')
                         html.append('</div>')
 
-            # MLE Gene Summary Table
+            # MLE Gene Summary Table — linked to all per-condition line plots
             html.append('<h5>MLE Gene Summary Table</h5>')
             html.append(_desc_html('gene_table'))
-            html.append(self._generate_dynamic_table(df, tid, gene_col='Gene', lineplot_id=lp_id))
-
-            # sgRNA line plot with default genes
-            if has_counts:
-                default_genes = self._get_default_genes_mle()
-                if lp_id:
-                    self._default_genes[lp_id] = default_genes
-                html.append('<h5>sgRNA log2 Fold Change '
-                            '<button class="download-btn-sm" onclick="clearLP(\'' + lp_id + '\')" '
-                            'style="margin-left:10px;">Clear Selection</button></h5>')
-                html.append(_desc_html('sgrna_line'))
-                html.append('<div id="' + lp_id + '" class="plotly-chart" style="height:380px;"></div>')
-                html.append('<script>Plotly.newPlot("' + lp_id + '",[],{title:{text:"Loading default genes..."},xaxis:{title:"Sample"},yaxis:{title:"log2 Fold Change",zeroline:true},height:380},' + _PLOTLY_CONFIG + ');</script>')
+            html.append(self._generate_dynamic_table(df, tid, gene_col='Gene', lineplot_id=combined_lp))
 
             # FLUTE-like plots: Beta density, consistency, selection, nine-square (2-column grid)
             if len(self.mle_conditions) >= 1:
@@ -1911,6 +1921,7 @@ var TID=%(TID)s,GK=%(GK)s,LP=%(LP)s,EK=%(EK)s;
 var COLS=%(COLS)s;
 var _RAW=%(DATA)s;
 var FKEYS=%(FKEYS)s;
+var _lpPrimary=LP&&LP.indexOf(",")>=0?LP.split(",")[0]:LP;
 /* Reconstruct records from compact column format */
 var DATA=[];
 for(var _i=0;_i<_RAW.v.length;_i++){var _o={};for(var _j=0;_j<_RAW.k.length;_j++)_o[_RAW.k[_j]]=_RAW.v[_i][_j];DATA.push(_o);}
@@ -1922,7 +1933,7 @@ function ren(){
 var tb=document.querySelector("#tbl-"+TID+" tbody");
 var s2=ps>0?pg*ps:0,e2=ps>0?Math.min(s2+ps,flt.length):flt.length,h="";
 for(var i=s2;i<e2;i++){var r=flt[i];
-var sel=window.selGenes&&window.selGenes[LP]&&window.selGenes[LP].has(r[GK]);
+var sel=window.selGenes&&window.selGenes[_lpPrimary]&&window.selGenes[_lpPrimary].has(r[GK]);
 h+='<tr'+(sel?' class="gene-sel"':'')+' data-g="'+r[GK]+'" onclick="tglGene(this,\\''+LP+'\\')">';
 for(var j=0;j<COLS.length;j++)h+="<td>"+fv(r[COLS[j].key],COLS[j].fmt)+"</td>";
 h+="</tr>";}
@@ -2264,11 +2275,12 @@ function drawNineSquare(divId){
 function tglGene(tr,lpId){
  if(!lpId)return;
  var gene=tr.getAttribute("data-g");
- if(!window.selGenes[lpId])window.selGenes[lpId]=new Set();
- var s=window.selGenes[lpId];
+ var ids=lpId.split(","),primary=ids[0];
+ if(!window.selGenes[primary])window.selGenes[primary]=new Set();
+ var s=window.selGenes[primary];
  if(s.has(gene)){s.delete(gene);tr.classList.remove("gene-sel");}
  else{if(s.size>=50){alert("Max 50 genes");return;}s.add(gene);tr.classList.add("gene-sel");}
- updLP(lpId);
+ for(var i=0;i<ids.length;i++){window.selGenes[ids[i]]=s;updLP(ids[i]);}
 }
 function updLP(lpId){
  var gs=window.selGenes[lpId];
@@ -2289,20 +2301,23 @@ function updLP(lpId){
 }
 /* Clear all gene selections for a line plot */
 function clearLP(lpId){
- if(!window.selGenes[lpId])return;
- window.selGenes[lpId].clear();
- /* Remove highlight from table rows */
+ var ids=lpId.split(","),primary=ids[0];
+ if(!window.selGenes[primary])return;
+ window.selGenes[primary].clear();
  document.querySelectorAll("[data-g]").forEach(function(tr){tr.classList.remove("gene-sel");});
- updLP(lpId);
+ for(var i=0;i<ids.length;i++){window.selGenes[ids[i]]=window.selGenes[primary];updLP(ids[i]);}
 }
 /* Auto-select default genes on page load */
 function initDefaults(){
  if(typeof DEFAULT_GENES==="undefined")return;
+ /* Build shared Set for LPs that have identical default gene lists */
+ var sharedSets={};
  Object.keys(DEFAULT_GENES).forEach(function(lpId){
   var genes=DEFAULT_GENES[lpId];
   if(!genes||genes.length===0)return;
-  if(!window.selGenes[lpId])window.selGenes[lpId]=new Set();
-  genes.forEach(function(g){window.selGenes[lpId].add(g);});
+  var key=genes.slice().sort().join(",");
+  if(!sharedSets[key]){sharedSets[key]=new Set();genes.forEach(function(g){sharedSets[key].add(g);});}
+  window.selGenes[lpId]=sharedSets[key];
   updLP(lpId);
  });
  /* Highlight default genes in visible table rows */
