@@ -1,0 +1,42 @@
+name: mageckenv
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - mageck=0.5.9.5
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - statsmodels
+  - scanpy
+  - anndata
+  - decoupler-py
+  - adjusttext
+  - h5py
+  - numba
+  - xgboost
+  - flask
+  - jinja2
+  - requests
+  - pyyaml
+  - tqdm
+  - joblib
+  - patsy
+  - networkx
+  - python-igraph
+  - umap-learn
+  - omnipath
+  - ipykernel
+  - pip
+  - pip:
+    - plotly>=6.0
+    - pydeseq2>=0.5
+    - formulaic
+    - formulaic-contrasts
+    - numcodecs
+    - pyarrow
