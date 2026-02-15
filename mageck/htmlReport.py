@@ -28,11 +28,27 @@ try:
 except ImportError:
     HAS_SKLEARN = False
 
-try:
-    import decoupler as dc
-    HAS_DECOUPLER = True
-except ImportError:
-    HAS_DECOUPLER = False
+# Decoupler is imported lazily (inside methods) to avoid adding a
+# StreamHandler to the root logger at module-import time, which would
+# prevent MAGeCK's logging.basicConfig(filename=...) from creating
+# log files.  The flag is set on first use via _ensure_decoupler().
+HAS_DECOUPLER = None  # None = not yet checked; True/False after check
+dc = None              # module reference, set by _ensure_decoupler()
+
+
+def _ensure_decoupler():
+    """Lazy-import decoupler on first use. Returns True if available."""
+    global HAS_DECOUPLER, dc
+    if HAS_DECOUPLER is not None:
+        return HAS_DECOUPLER
+    try:
+        import decoupler as _dc
+        dc = _dc
+        HAS_DECOUPLER = True
+    except ImportError:
+        HAS_DECOUPLER = False
+    return HAS_DECOUPLER
+
 
 from mageck.version import __version__
 
@@ -1245,7 +1261,7 @@ class MAGeCKHTMLReport:
     def _fetch_hallmark_net(self):
         if self._hallmark_net is not None:
             return self._hallmark_net
-        if not HAS_DECOUPLER:
+        if not _ensure_decoupler():
             logging.warning('decoupler not installed; skipping enrichment.')
             return None
         try:
@@ -1762,7 +1778,7 @@ class MAGeCKHTMLReport:
                 html.append('</div>')
 
                 # Enrichment (side by side: depleted + enriched)
-                if not self.skip_enrichment and HAS_DECOUPLER:
+                if not self.skip_enrichment and _ensure_decoupler():
                     gene_col = 'id' if 'id' in df.columns else df.columns[0]
                     all_genes = df[gene_col].tolist()
                     html.append('<h5>Hallmark Pathway Enrichment</h5>')
@@ -1860,7 +1876,7 @@ class MAGeCKHTMLReport:
                 html.append('</div>')
 
                 # Enrichment (side by side: depleted + enriched)
-                if not self.skip_enrichment and HAS_DECOUPLER:
+                if not self.skip_enrichment and _ensure_decoupler():
                     all_genes = df['Gene'].tolist()
                     beta_col = cond + '|beta'
                     if beta_col in df.columns and fdr_col in df.columns:
@@ -1990,7 +2006,7 @@ class MAGeCKHTMLReport:
 
     def _embed_hallmark_data(self):
         """Embed hallmark gene sets for client-side enrichment recomputation."""
-        if self.skip_enrichment or not HAS_DECOUPLER:
+        if self.skip_enrichment or not _ensure_decoupler():
             return ''
         net = self._fetch_hallmark_net()
         if net is None:
