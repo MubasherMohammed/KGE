@@ -742,7 +742,7 @@ class MAGeCKHTMLReport:
         for i, s in enumerate(self.sample_names):
             vals = np.log2(df_norm[s].values.astype(float) + 1)
             vals = vals[np.isfinite(vals)]
-            counts_d, edges_d = np.histogram(vals, bins=80, density=False)
+            counts_d, edges_d = np.histogram(vals, bins=40, density=False)
             centers_d = ((edges_d[:-1] + edges_d[1:]) / 2).tolist()
             traces_dens.append({
                 'type': 'scatter', 'mode': 'lines', 'fill': 'tozeroy',
