@@ -418,17 +418,6 @@ class MAGeCKHTMLReport:
             elif self.mle_sgrna_summary is None:
                 self.mle_sgrna_summary = pd.read_csv(sgf, sep='\t')
 
-        if self.design_matrix_path and os.path.isfile(self.design_matrix_path):
-            self.design_matrix_df = pd.read_csv(self.design_matrix_path, sep='\t')
-        else:
-            # Search for common design matrix naming patterns
-            for dm_name in ['design_matrix.txt', 'designmatrix.txt']:
-                dm_candidate = os.path.join(base_dir, dm_name)
-                if os.path.isfile(dm_candidate):
-                    self.design_matrix_df = pd.read_csv(dm_candidate, sep='\t')
-                    logging.info('Loaded design matrix: %s', dm_candidate)
-                    break
-
         # Detect countsummary from mageck count (mapping statistics)
         cs_candidate = self.output_prefix + '.countsummary.txt'
         if not os.path.isfile(cs_candidate):
@@ -439,19 +428,13 @@ class MAGeCKHTMLReport:
             self.countsummary_df = pd.read_csv(cs_candidate, sep='\t')
             logging.info('Loaded count summary: %s', cs_candidate)
 
-        # Detect MAGeCK log files.
-        # MAGeCK writes {output_prefix}.log via logging.basicConfig() in
-        # argsParser.py (count/test) and mleargparse.py (mle).
-        # Collect ALL .log files in the results directory so the download
-        # section includes logs from every pipeline step (count, test, mle).
+        # Detect MAGeCK log files (before design matrix, which may parse them).
         seen_logs = set()
-        # Prefer the exact prefix match first (appears at top of list)
         log_candidate = self.output_prefix + '.log'
         if os.path.isfile(log_candidate):
             rp = os.path.realpath(log_candidate)
             seen_logs.add(rp)
             self._log_files.append((os.path.basename(log_candidate), log_candidate))
-        # Also include any other .log files in the same directory
         for lf in sorted(glob.glob(os.path.join(base_dir, '*.log'))):
             rp = os.path.realpath(lf)
             if rp not in seen_logs:
@@ -459,6 +442,29 @@ class MAGeCKHTMLReport:
                 self._log_files.append((os.path.basename(lf), lf))
         if self._log_files:
             logging.info('Detected %d log file(s)', len(self._log_files))
+
+        # Design matrix: use explicit path, or extract from MLE log
+        if self.design_matrix_path and os.path.isfile(self.design_matrix_path):
+            self.design_matrix_df = pd.read_csv(self.design_matrix_path, sep='\t')
+        else:
+            for _lbl, _lpath in self._log_files:
+                try:
+                    with open(_lpath) as _lf:
+                        first_line = _lf.readline()
+                    if ' mle ' in first_line and (' -d ' in first_line or '--design-matrix' in first_line):
+                        import shlex
+                        parts = shlex.split(first_line)
+                        for pi, p in enumerate(parts):
+                            if p in ('-d', '--design-matrix') and pi + 1 < len(parts):
+                                dm_cand = parts[pi + 1]
+                                if os.path.isfile(dm_cand):
+                                    self.design_matrix_df = pd.read_csv(dm_cand, sep='\t')
+                                    logging.info('Loaded design matrix from MLE log: %s', dm_cand)
+                                break
+                except Exception:
+                    pass
+                if self.design_matrix_df is not None:
+                    break
 
     def _load_count_table(self, path):
         sep = ',' if path.endswith('.csv') else '\t'
