@@ -87,13 +87,13 @@ _DESC = {
     'lib_size': ('Total read counts per sample. Uniform library sizes across '
                  'conditions indicate comparable sequencing depth, which is '
                  'essential for reliable differential analysis.'),
-    'count_dist': ('Distribution of log\u2082-transformed sgRNA read counts. '
-                   'A shift toward lower values in treated samples may indicate '
-                   'library-wide depletion or selection pressure.'),
+    'count_dist': ('Distribution of median-normalized read counts across all samples. '
+                   'Each box shows the interquartile range; whiskers extend to 1.5\u00d7IQR. '
+                   'Comparable distributions indicate effective normalization.'),
     'density_norm': ('Density distributions of median-ratio normalized '
-                     'sgRNA counts (log\u2082-transformed). Normalization '
-                     'reduces technical variation between samples while '
-                     'preserving biological differences.'),
+                     'sgRNA counts (log\u2082-transformed). A shift toward lower values '
+                     'in treated samples may indicate library-wide depletion or '
+                     'selection pressure.'),
     'zero_count': ('sgRNAs with zero reads per sample. Elevated zero-counts '
                    'in treatment conditions suggest guide dropout under '
                    'selection, while high baseline zeros may reflect '
@@ -215,7 +215,13 @@ def _jdumps(obj):
 
 
 def _calculate_gini(x):
-    """Compute Gini index (replicates MAGeCK's mageckCountIO logic)."""
+    """Compute Gini index — exact replica of MAGeCK's mageckcount_gini().
+
+    MAGeCK computes Gini on log(count+1) transformed values, so callers
+    should pass log-transformed values to match MAGeCK output.
+    Formula: 1.0 - 2.0*(n - gssum/ysum)/(n-1)
+    Reference: http://en.wikipedia.org/wiki/Gini_coefficient
+    """
     arr = np.array(x, dtype=float)
     arr = arr[~np.isnan(arr)]
     if len(arr) == 0:
@@ -223,10 +229,11 @@ def _calculate_gini(x):
     arr = np.sort(arr)
     n = len(arr)
     total = arr.sum()
-    if total == 0:
-        return 0.0
-    index = np.arange(1, n + 1)
-    return (2.0 * np.sum(index * arr)) / (n * total) - (n + 1.0) / n
+    if total == 0.0:
+        total = 1.0
+    index = np.arange(1.0, n + 1.0)
+    gssum = np.sum(index * arr)
+    return 1.0 - 2.0 * (n - gssum / total) / (n - 1)
 
 
 def _median_normalize(count_df):
@@ -331,6 +338,9 @@ class MAGeCKHTMLReport:
         # Default gene selections for line plots
         self._default_genes = {}  # lp_id -> [gene_names]
 
+        # Downloadable files (detected in detect_outputs)
+        self._log_files = []  # list of (label, path) tuples
+
         # HTML assembly
         self.sections = []
         self._div_counter = 0
@@ -411,6 +421,17 @@ class MAGeCKHTMLReport:
         if os.path.isfile(cs_candidate):
             self.countsummary_df = pd.read_csv(cs_candidate, sep='\t')
             logging.info('Loaded count summary: %s', cs_candidate)
+
+        # Detect MAGeCK log files
+        log_candidate = self.output_prefix + '.log'
+        if os.path.isfile(log_candidate):
+            self._log_files.append((os.path.basename(log_candidate), log_candidate))
+        else:
+            log_files = sorted(glob.glob(os.path.join(base_dir, '*.log')))
+            for lf in log_files:
+                self._log_files.append((os.path.basename(lf), lf))
+        if self._log_files:
+            logging.info('Detected %d log file(s)', len(self._log_files))
 
     def _load_count_table(self, path):
         sep = ',' if path.endswith('.csv') else '\t'
@@ -626,33 +647,29 @@ class MAGeCKHTMLReport:
         return self._plotly_div(traces, layout)
 
     def plot_count_distribution(self):
-        """Two side-by-side distribution plots using median-normalized counts."""
+        """Box plot + density plot of median-normalized read counts."""
         df_norm = self.normalized_df if self.normalized_df is not None else self.count_df
         colors = _QUAL_COLORS[:len(self.sample_names)]
 
-        # Left: histogram of normalized counts (like MAGeCK QC)
-        traces_hist = []
+        # Left (1st): Box plot of normalized read counts per sample
+        traces_box = []
         for i, s in enumerate(self.sample_names):
             vals = np.log2(df_norm[s].values.astype(float) + 1)
             vals = vals[np.isfinite(vals)]
-            counts, edges = np.histogram(vals, bins=50, density=True)
-            centers = ((edges[:-1] + edges[1:]) / 2).tolist()
-            traces_hist.append({
-                'type': 'bar', 'x': centers, 'y': counts.tolist(),
-                'name': s, 'opacity': 0.6,
+            traces_box.append({
+                'type': 'box', 'y': vals.tolist(),
+                'name': s,
                 'marker': {'color': colors[i]},
-                'width': float(edges[1] - edges[0])})
-        layout_hist = {'title': {'text': 'Median-Normalized Count Distribution', 'font': {'size': 13}},
-                       'xaxis': {'title': 'log\u2082(normalized count + 1)', 'automargin': True,
-                                 'tickfont': {'size': 10}},
-                       'yaxis': {'title': 'Density', 'automargin': True,
-                                 'tickfont': {'size': 10}},
-                       'barmode': 'overlay',
-                       'legend': {'font': {'size': 10}},
-                       'height': 340, 'margin': {'t': 45, 'b': 40, 'l': 50, 'r': 15}}
-        hist_html = self._plotly_div(traces_hist, layout_hist)
+                'boxpoints': False})
+        layout_box = {'title': {'text': 'Normalized Read Count Distribution', 'font': {'size': 13}},
+                      'yaxis': {'title': 'log\u2082(read counts)', 'automargin': True,
+                                'tickfont': {'size': 10}},
+                      'xaxis': {'automargin': True, 'tickfont': {'size': 10}},
+                      'legend': {'font': {'size': 10}},
+                      'height': 340, 'margin': {'t': 45, 'b': 40, 'l': 50, 'r': 15}}
+        box_html = self._plotly_div(traces_box, layout_box)
 
-        # Right: density curve of normalized counts
+        # Right (2nd): Density plot of read count distribution
         traces_dens = []
         for i, s in enumerate(self.sample_names):
             vals = np.log2(df_norm[s].values.astype(float) + 1)
@@ -664,15 +681,15 @@ class MAGeCKHTMLReport:
                 'x': centers_d, 'y': counts_d.tolist(),
                 'name': s, 'opacity': 0.5,
                 'line': {'color': colors[i], 'width': 2}})
-        layout_dens = {'title': {'text': 'Median-Normalized Density', 'font': {'size': 13}},
-                       'xaxis': {'title': 'log\u2082(normalized count + 1)', 'automargin': True,
+        layout_dens = {'title': {'text': 'Read Count Density', 'font': {'size': 13}},
+                       'xaxis': {'title': 'log\u2082(counts)', 'automargin': True,
                                  'tickfont': {'size': 10}},
-                       'yaxis': {'title': 'Density', 'automargin': True,
+                       'yaxis': {'title': 'Frequency', 'automargin': True,
                                  'tickfont': {'size': 10}},
                        'legend': {'font': {'size': 10}},
                        'height': 340, 'margin': {'t': 45, 'b': 40, 'l': 50, 'r': 15}}
         dens_html = self._plotly_div(traces_dens, layout_dens)
-        return hist_html, dens_html
+        return box_html, dens_html
 
     def plot_zero_count_guides(self):
         zeros = [(self.count_df[s] == 0).sum() for s in self.sample_names]
@@ -692,7 +709,19 @@ class MAGeCKHTMLReport:
         return self._plotly_div(traces, layout)
 
     def plot_gini_index(self):
-        ginis = [_calculate_gini(self.count_df[s].values) for s in self.sample_names]
+        # Use countsummary GiniIndex if available (most accurate — from mageck count)
+        ginis = None
+        if self.countsummary_df is not None and 'GiniIndex' in self.countsummary_df.columns:
+            cs = self.countsummary_df
+            label_col = 'Label' if 'Label' in cs.columns else cs.columns[1]
+            cs_map = dict(zip(cs[label_col].astype(str), cs['GiniIndex'].astype(float)))
+            if all(s in cs_map for s in self.sample_names):
+                ginis = [cs_map[s] for s in self.sample_names]
+                logging.info('Using Gini index from countsummary file')
+        if ginis is None:
+            # Compute matching MAGeCK: Gini on log(count + 1) values
+            ginis = [_calculate_gini(np.log(self.count_df[s].values.astype(float) + 1.0))
+                     for s in self.sample_names]
         colors = _QUAL_COLORS[:len(self.sample_names)]
         traces = [{'type': 'bar', 'x': self.sample_names, 'y': ginis,
                    'text': ['{:.3f}'.format(g) for g in ginis],
@@ -741,18 +770,37 @@ class MAGeCKHTMLReport:
         df = self.normalized_df if self.normalized_df is not None else self.count_df
         log_data = np.log2(df[self.sample_names].values.astype(float) + 1)
         corr = np.corrcoef(log_data.T)
-        text_vals = [['{:.3f}'.format(corr[i][j]) for j in range(len(self.sample_names))]
-                     for i in range(len(self.sample_names))]
+
+        # Hierarchical clustering to reorder rows/columns
+        sample_order = list(range(len(self.sample_names)))
+        try:
+            from scipy.cluster.hierarchy import linkage, leaves_list
+            from scipy.spatial.distance import squareform
+            dist = 1.0 - corr
+            np.fill_diagonal(dist, 0)
+            dist = np.clip(dist, 0, None)
+            condensed = squareform(dist)
+            Z = linkage(condensed, method='average')
+            sample_order = leaves_list(Z).tolist()
+        except ImportError:
+            pass  # scipy not available — use original order
+
+        ordered_names = [self.sample_names[i] for i in sample_order]
+        corr_ordered = corr[np.ix_(sample_order, sample_order)]
+
+        text_vals = [['{:.3f}'.format(corr_ordered[i][j])
+                      for j in range(len(ordered_names))]
+                     for i in range(len(ordered_names))]
         traces = [{'type': 'heatmap',
-                   'z': corr.tolist(),
-                   'x': self.sample_names, 'y': self.sample_names,
+                   'z': corr_ordered.tolist(),
+                   'x': ordered_names, 'y': ordered_names,
                    'text': text_vals, 'texttemplate': '%{text}',
                    'textfont': {'size': 11},
                    'colorscale': 'RdYlBu', 'reversescale': True,
                    'zmin': 0.9, 'zmax': 1.0,
                    'hovertemplate': '%{y} vs %{x}<br>r = %{z:.4f}'}]
         n = len(self.sample_names)
-        layout = {'title': {'text': 'Sample Correlation (Pearson)', 'font': {'size': 13}},
+        layout = {'title': {'text': 'Sample Correlation (Pearson, clustered)', 'font': {'size': 13}},
                   'height': max(320, n * 70 + 80),
                   'margin': {'t': 45, 'b': 50, 'l': 90, 'r': 15},
                   'xaxis': {'automargin': True, 'tickfont': {'size': 10}},
@@ -1641,7 +1689,15 @@ class MAGeCKHTMLReport:
                         + ', '.join(self.mle_conditions) + '</strong>.</div>')
             df = self.mle_gene_summary
 
-            # MLE Gene Summary Table (before volcanos so table_id is available)
+            # Design matrix display
+            if self.design_matrix_df is not None:
+                html.append('<h4>Design Matrix</h4>')
+                html.append('<p class="plot-desc">The design matrix used for MLE '
+                            'estimation. Rows represent samples and columns represent '
+                            'conditions being tested.</p>')
+                html.append(self._df_to_html_table(self.design_matrix_df))
+
+            # MLE Gene Summary Table FIRST (harmonized with RRA order)
             tid = 'mle-' + os.path.basename(self.output_prefix).replace(' ', '_')
             mle_lp_ids = []
             if has_counts:
@@ -1652,7 +1708,11 @@ class MAGeCKHTMLReport:
                     self._default_genes[_lp] = default_genes
             combined_lp = ','.join(mle_lp_ids)
 
-            # Per-condition: volcano + line plot + enrichment
+            html.append('<h5>MLE Gene Summary Table</h5>')
+            html.append(_desc_html('gene_table'))
+            html.append(self._generate_dynamic_table(df, tid, gene_col='Gene', lineplot_id=combined_lp))
+
+            # Per-condition: FDR summary + volcano + line plot + enrichment
             for ci_idx, cond in enumerate(self.mle_conditions):
                 sample_name = self._condition_to_sample(cond)
                 cond_label = cond + ' vs ' + baseline_name
@@ -1721,11 +1781,6 @@ class MAGeCKHTMLReport:
                         html.append('</div>')
                         html.append('</div>')
 
-            # MLE Gene Summary Table — linked to all per-condition line plots
-            html.append('<h5>MLE Gene Summary Table</h5>')
-            html.append(_desc_html('gene_table'))
-            html.append(self._generate_dynamic_table(df, tid, gene_col='Gene', lineplot_id=combined_lp))
-
             # FLUTE-like plots: Beta density, consistency, selection, nine-square (2-column grid)
             if len(self.mle_conditions) >= 1:
                 html.append('<h4>Beta Score Analysis (FLUTE-style)</h4>')
@@ -1779,7 +1834,6 @@ class MAGeCKHTMLReport:
                     html.append('</div>')
 
             elif len(self.mle_conditions) == 1:
-                # Single condition: only density plot
                 html.append(_desc_html('mle_beta_density'))
                 v = self.plot_mle_beta_density()
                 if v:
@@ -1848,6 +1902,68 @@ class MAGeCKHTMLReport:
         return ('<script>\nvar HALLMARK_SETS=' + json.dumps(pathway_genes, separators=(',', ':')) + ';\n</script>\n')
 
     # ------------------------------------------------------------------
+    # Downloads section
+    # ------------------------------------------------------------------
+
+    def _build_downloads_section(self):
+        """Build a downloads section with links to count table and log files."""
+        html = []
+
+        # Embed count table as downloadable CSV
+        if self.count_df is not None and self.count_table_path:
+            ct_name = os.path.basename(self.count_table_path)
+            try:
+                with open(self.count_table_path, 'r') as f:
+                    ct_content = f.read()
+                ct_b64 = base64.b64encode(ct_content.encode('utf-8')).decode('ascii')
+                html.append('<h3>Count Table</h3>')
+                html.append('<p class="plot-desc">The sgRNA count table used for this analysis.</p>')
+                html.append('<div class="download-section">')
+                html.append('<a class="download-btn" href="data:text/plain;base64,'
+                            + ct_b64 + '" download="' + ct_name
+                            + '">Download ' + ct_name + '</a>')
+                html.append('</div>')
+            except Exception:
+                logging.warning('Could not embed count table for download')
+
+        # Embed log files
+        if self._log_files:
+            html.append('<h3>MAGeCK Log Files</h3>')
+            html.append('<p class="plot-desc">Log files containing the MAGeCK '
+                        'run commands and processing details.</p>')
+            html.append('<div class="download-section">')
+            for label, path in self._log_files:
+                try:
+                    with open(path, 'r') as f:
+                        log_content = f.read()
+                    log_b64 = base64.b64encode(log_content.encode('utf-8')).decode('ascii')
+                    html.append('<a class="download-btn" href="data:text/plain;base64,'
+                                + log_b64 + '" download="' + label
+                                + '">Download ' + label + '</a>')
+                except Exception:
+                    logging.warning('Could not embed log file: %s', path)
+            html.append('</div>')
+
+        # Embed countsummary if available
+        if self.countsummary_df is not None:
+            cs_name = os.path.basename(self.output_prefix) + '.countsummary.txt'
+            try:
+                cs_text = self.countsummary_df.to_csv(sep='\t', index=False)
+                cs_b64 = base64.b64encode(cs_text.encode('utf-8')).decode('ascii')
+                html.append('<h3>Count Summary</h3>')
+                html.append('<p class="plot-desc">Mapping statistics from MAGeCK count.</p>')
+                html.append('<div class="download-section">')
+                html.append('<a class="download-btn" href="data:text/plain;base64,'
+                            + cs_b64 + '" download="' + cs_name
+                            + '">Download ' + cs_name + '</a>')
+                html.append('</div>')
+            except Exception:
+                logging.warning('Could not embed count summary for download')
+
+        if html:
+            self.sections.append(('downloads', 'Downloads', '\n'.join(html)))
+
+    # ------------------------------------------------------------------
     # HTML assembly
     # ------------------------------------------------------------------
 
@@ -1900,6 +2016,7 @@ class MAGeCKHTMLReport:
             self._build_qc_section()
         if not self.skip_results:
             self._build_results_section()
+        self._build_downloads_section()
         if not self.sections:
             logging.warning('No data found. Check output prefix and file paths.')
             return

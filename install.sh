@@ -16,11 +16,44 @@ echo "  KGE Installer — MAGeCK + Interactive HTML"
 echo "============================================"
 echo ""
 
-# ---- Step 1: Check conda ----
+# ---- Step 1: Check / Install conda ----
 if ! command -v conda &> /dev/null; then
-    echo "ERROR: conda not found. Install Miniconda/Anaconda first."
-    echo "  https://docs.conda.io/en/latest/miniconda.html"
-    exit 1
+    echo "[0/4] conda not found — installing Miniconda..."
+
+    # Detect OS and architecture
+    OS="$(uname -s)"
+    ARCH="$(uname -m)"
+    case "${OS}" in
+        Linux)  PLATFORM="Linux" ;;
+        Darwin) PLATFORM="MacOSX" ;;
+        *)      echo "ERROR: Unsupported OS: ${OS}"; exit 1 ;;
+    esac
+    case "${ARCH}" in
+        x86_64)  MARCH="x86_64" ;;
+        aarch64|arm64) MARCH="aarch64" ;;
+        *)       echo "ERROR: Unsupported architecture: ${ARCH}"; exit 1 ;;
+    esac
+
+    MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-${PLATFORM}-${MARCH}.sh"
+    MINICONDA_INSTALLER="/tmp/miniconda_installer.sh"
+
+    echo "  Downloading: ${MINICONDA_URL}"
+    curl -fsSL -o "${MINICONDA_INSTALLER}" "${MINICONDA_URL}"
+    chmod +x "${MINICONDA_INSTALLER}"
+
+    CONDA_PREFIX="${HOME}/miniconda3"
+    echo "  Installing to: ${CONDA_PREFIX}"
+    bash "${MINICONDA_INSTALLER}" -b -p "${CONDA_PREFIX}"
+    rm -f "${MINICONDA_INSTALLER}"
+
+    # Initialize conda in this shell session
+    eval "$("${CONDA_PREFIX}/bin/conda" shell.bash hook)"
+    conda init bash 2>/dev/null || true
+
+    echo "  Miniconda installed successfully."
+    echo "  NOTE: Restart your terminal or run 'source ~/.bashrc' after"
+    echo "        installation to use conda in future sessions."
+    echo ""
 fi
 
 # ---- Step 2: Create conda environment ----
