@@ -976,10 +976,10 @@ class MAGeCKHTMLReport:
         top_enr = np.where(pos_mask)[0][np.argsort(pos_fdr[pos_mask])][:20].tolist() if pos_mask.any() else []
         top_dep = np.where(neg_mask)[0][np.argsort(neg_fdr[neg_mask])][:20].tolist() if neg_mask.any() else []
         vdata = {'g': genes.tolist(),
-                 'lfc': np.round(lfc, 2).tolist(),
-                 'y': np.round(y, 1).tolist(),
-                 'nf': np.round(neg_fdr, 3).tolist(),
-                 'pf': np.round(pos_fdr, 3).tolist(),
+                 'lfc': np.round(lfc, 4).tolist(),
+                 'y': np.round(y, 4).tolist(),
+                 'nf': np.round(neg_fdr, 6).tolist(),
+                 'pf': np.round(pos_fdr, 6).tolist(),
                  'top_enr': top_enr, 'top_dep': top_dep}
         return self._volcano_html(div_id, vdata, label + ': Volcano',
                                   'Log2 Fold Change', '-log10(FDR)', 'LFC',
@@ -1006,10 +1006,10 @@ class MAGeCKHTMLReport:
         top_enr = np.where(pos_mask)[0][np.argsort(fdr[pos_mask])][:20].tolist() if pos_mask.any() else []
         top_dep = np.where(neg_mask)[0][np.argsort(fdr[neg_mask])][:20].tolist() if neg_mask.any() else []
         vdata = {'g': genes.tolist(),
-                 'lfc': np.round(beta, 2).tolist(),
-                 'y': np.round(y, 1).tolist(),
-                 'nf': np.round(fdr, 3).tolist(),
-                 'pf': np.round(fdr, 3).tolist(),
+                 'lfc': np.round(beta, 4).tolist(),
+                 'y': np.round(y, 4).tolist(),
+                 'nf': np.round(fdr, 6).tolist(),
+                 'pf': np.round(fdr, 6).tolist(),
                  'top_enr': top_enr, 'top_dep': top_dep}
         baseline_name = self._get_baseline_name()
         title = condition + ' vs ' + baseline_name + ' (Normalized Beta)'
@@ -1046,8 +1046,8 @@ class MAGeCKHTMLReport:
         depleted = sig & (vy < 0)
         enriched = sig & (vy > 0)
         ns = ~(depleted | enriched)
-        vx = np.round(vx, 2)
-        vy = np.round(vy, 2)
+        vx = np.round(vx, 4)
+        vy = np.round(vy, 4)
         traces = []
         ht = 'Gene: %{text}<br>' + name_x + ': %{x:.3f}<br>' + name_y + ': %{y:.3f}'
         if ns.any():
