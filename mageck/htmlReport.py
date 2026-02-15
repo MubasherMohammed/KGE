@@ -47,6 +47,7 @@ _QUAL_COLORS = [
 _PLOTLY_CDN = 'https://cdn.plot.ly/plotly-2.27.0.min.js'
 _PLOTLY_CONFIG = json.dumps({
     'displayModeBar': True, 'responsive': True,
+    'displaylogo': False,
     'toImageButtonOptions': {'format': 'svg'},
 })
 
@@ -90,10 +91,10 @@ _DESC = {
     'count_dist': ('Distribution of median-normalized read counts across all samples. '
                    'Each box shows the interquartile range; whiskers extend to 1.5\u00d7IQR. '
                    'Comparable distributions indicate effective normalization.'),
-    'density_norm': ('Density distributions of median-ratio normalized '
-                     'sgRNA counts (log\u2082-transformed). A shift toward lower values '
-                     'in treated samples may indicate library-wide depletion or '
-                     'selection pressure.'),
+    'density_norm': ('Distribution of median-normalized read counts '
+                     '(log\u2082-transformed). The Y-axis shows the total frequency '
+                     '(number of sgRNAs). A shift toward lower values in treated '
+                     'samples may indicate library-wide depletion or selection pressure.'),
     'zero_count': ('sgRNAs with zero reads per sample. Elevated zero-counts '
                    'in treatment conditions suggest guide dropout under '
                    'selection, while high baseline zeros may reflect '
@@ -651,16 +652,18 @@ class MAGeCKHTMLReport:
         df_norm = self.normalized_df if self.normalized_df is not None else self.count_df
         colors = _QUAL_COLORS[:len(self.sample_names)]
 
-        # Left (1st): Box plot of normalized read counts per sample
+        # Left (1st): Box plot with outlier dots (MAGeCK style)
         traces_box = []
         for i, s in enumerate(self.sample_names):
             vals = np.log2(df_norm[s].values.astype(float) + 1)
             vals = vals[np.isfinite(vals)]
             traces_box.append({
-                'type': 'box', 'y': vals.tolist(),
+                'type': 'box', 'y': np.round(vals, 2).tolist(),
                 'name': s,
-                'marker': {'color': colors[i]},
-                'boxpoints': False})
+                'marker': {'color': colors[i], 'size': 4, 'opacity': 0.6},
+                'boxpoints': 'outliers',
+                'jitter': 0.3,
+                'pointpos': 0})
         layout_box = {'title': {'text': 'Normalized Read Count Distribution', 'font': {'size': 13}},
                       'yaxis': {'title': 'log\u2082(read counts)', 'automargin': True,
                                 'tickfont': {'size': 10}},
@@ -669,25 +672,27 @@ class MAGeCKHTMLReport:
                       'height': 340, 'margin': {'t': 45, 'b': 40, 'l': 50, 'r': 15}}
         box_html = self._plotly_div(traces_box, layout_box)
 
-        # Right (2nd): Density plot of read count distribution
+        # Right (2nd): Histogram of read count distribution (total frequency)
         traces_dens = []
         for i, s in enumerate(self.sample_names):
             vals = np.log2(df_norm[s].values.astype(float) + 1)
             vals = vals[np.isfinite(vals)]
-            counts_d, edges_d = np.histogram(vals, bins=80, density=True)
+            counts_d, edges_d = np.histogram(vals, bins=80, density=False)
             centers_d = ((edges_d[:-1] + edges_d[1:]) / 2).tolist()
             traces_dens.append({
                 'type': 'scatter', 'mode': 'lines', 'fill': 'tozeroy',
                 'x': centers_d, 'y': counts_d.tolist(),
                 'name': s, 'opacity': 0.5,
                 'line': {'color': colors[i], 'width': 2}})
-        layout_dens = {'title': {'text': 'Read Count Density', 'font': {'size': 13}},
-                       'xaxis': {'title': 'log\u2082(counts)', 'automargin': True,
-                                 'tickfont': {'size': 10}},
+        layout_dens = {'title': {'text': 'Distribution of Read Counts', 'font': {'size': 13}},
+                       'xaxis': {'title': 'log\u2082(read counts)', 'automargin': True,
+                                 'tickfont': {'size': 9},
+                                 'dtick': 4, 'tick0': 0},
                        'yaxis': {'title': 'Frequency', 'automargin': True,
-                                 'tickfont': {'size': 10}},
+                                 'tickfont': {'size': 10},
+                                 'rangemode': 'tozero'},
                        'legend': {'font': {'size': 10}},
-                       'height': 340, 'margin': {'t': 45, 'b': 40, 'l': 50, 'r': 15}}
+                       'height': 340, 'margin': {'t': 45, 'b': 45, 'l': 60, 'r': 15}}
         dens_html = self._plotly_div(traces_dens, layout_dens)
         return box_html, dens_html
 
@@ -773,8 +778,9 @@ class MAGeCKHTMLReport:
 
         # Hierarchical clustering to reorder rows/columns
         sample_order = list(range(len(self.sample_names)))
+        Z = None
         try:
-            from scipy.cluster.hierarchy import linkage, leaves_list
+            from scipy.cluster.hierarchy import linkage, leaves_list, dendrogram as scipy_dendrogram
             from scipy.spatial.distance import squareform
             dist = 1.0 - corr
             np.fill_diagonal(dist, 0)
@@ -791,21 +797,111 @@ class MAGeCKHTMLReport:
         text_vals = [['{:.3f}'.format(corr_ordered[i][j])
                       for j in range(len(ordered_names))]
                      for i in range(len(ordered_names))]
-        traces = [{'type': 'heatmap',
-                   'z': corr_ordered.tolist(),
-                   'x': ordered_names, 'y': ordered_names,
-                   'text': text_vals, 'texttemplate': '%{text}',
-                   'textfont': {'size': 11},
-                   'colorscale': 'RdYlBu', 'reversescale': True,
-                   'zmin': 0.9, 'zmax': 1.0,
-                   'hovertemplate': '%{y} vs %{x}<br>r = %{z:.4f}'}]
+
         n = len(self.sample_names)
-        layout = {'title': {'text': 'Sample Correlation (Pearson, clustered)', 'font': {'size': 13}},
-                  'height': max(320, n * 70 + 80),
-                  'margin': {'t': 45, 'b': 50, 'l': 90, 'r': 15},
-                  'xaxis': {'automargin': True, 'tickfont': {'size': 10}},
-                  'yaxis': {'autorange': 'reversed', 'automargin': True,
-                            'tickfont': {'size': 10}}}
+
+        # Build dendrograms if scipy is available
+        if Z is not None:
+            # Get dendrogram coordinates (no_plot=True to avoid matplotlib)
+            dendro = scipy_dendrogram(Z, no_plot=True, labels=ordered_names)
+
+            # Top dendrogram traces
+            dendro_top_traces = []
+            for i in range(len(dendro['icoord'])):
+                dendro_top_traces.append({
+                    'type': 'scatter', 'mode': 'lines',
+                    'x': dendro['icoord'][i],
+                    'y': dendro['dcoord'][i],
+                    'line': {'color': '#2c3e50', 'width': 1.2},
+                    'hoverinfo': 'skip', 'showlegend': False,
+                    'xaxis': 'x2', 'yaxis': 'y2'})
+
+            # Left dendrogram traces (rotated: swap x/y, flip y)
+            dendro_left_traces = []
+            for i in range(len(dendro['icoord'])):
+                dendro_left_traces.append({
+                    'type': 'scatter', 'mode': 'lines',
+                    'x': dendro['dcoord'][i],
+                    'y': dendro['icoord'][i],
+                    'line': {'color': '#2c3e50', 'width': 1.2},
+                    'hoverinfo': 'skip', 'showlegend': False,
+                    'xaxis': 'x3', 'yaxis': 'y3'})
+
+            # Heatmap trace on its own axes
+            heatmap_trace = {
+                'type': 'heatmap',
+                'z': corr_ordered.tolist(),
+                'x': list(range(n)), 'y': list(range(n)),
+                'text': text_vals, 'texttemplate': '%{text}',
+                'textfont': {'size': 11},
+                'colorscale': 'RdYlBu', 'reversescale': True,
+                'zmin': 0.9, 'zmax': 1.0,
+                'hovertemplate': '%{customdata[0]} vs %{customdata[1]}<br>r = %{z:.4f}',
+                'customdata': [[[ordered_names[i], ordered_names[j]]
+                               for j in range(n)] for i in range(n)],
+                'xaxis': 'x', 'yaxis': 'y'}
+
+            traces = [heatmap_trace] + dendro_top_traces + dendro_left_traces
+
+            # Dendrogram tick positions: 5, 15, 25, ... (default scipy spacing)
+            tick_vals = [5 + 10 * i for i in range(n)]
+            hm_tick_vals = list(range(n))
+
+            plot_h = max(420, n * 70 + 150)
+            dendro_frac = 0.15  # fraction of plot for dendrograms
+
+            layout = {
+                'title': {'text': 'Sample Correlation (Pearson, clustered)', 'font': {'size': 13}},
+                'height': plot_h,
+                'margin': {'t': 45, 'b': 50, 'l': 15, 'r': 15},
+                'showlegend': False,
+                # Main heatmap axes
+                'xaxis': {'domain': [dendro_frac, 1.0],
+                          'tickvals': hm_tick_vals, 'ticktext': ordered_names,
+                          'automargin': True, 'tickfont': {'size': 10},
+                          'side': 'bottom'},
+                'yaxis': {'domain': [0, 1.0 - dendro_frac],
+                          'autorange': 'reversed',
+                          'tickvals': hm_tick_vals, 'ticktext': ordered_names,
+                          'automargin': True, 'tickfont': {'size': 10}},
+                # Top dendrogram
+                'xaxis2': {'domain': [dendro_frac, 1.0],
+                           'showgrid': False, 'zeroline': False,
+                           'showticklabels': False,
+                           'range': [min(d for ic in dendro['icoord'] for d in ic) - 2,
+                                     max(d for ic in dendro['icoord'] for d in ic) + 2],
+                           'anchor': 'y2'},
+                'yaxis2': {'domain': [1.0 - dendro_frac, 1.0],
+                           'showgrid': False, 'zeroline': False,
+                           'showticklabels': False, 'anchor': 'x2'},
+                # Left dendrogram
+                'xaxis3': {'domain': [0, dendro_frac - 0.02],
+                           'showgrid': False, 'zeroline': False,
+                           'showticklabels': False,
+                           'autorange': 'reversed', 'anchor': 'y3'},
+                'yaxis3': {'domain': [0, 1.0 - dendro_frac],
+                           'showgrid': False, 'zeroline': False,
+                           'showticklabels': False,
+                           'range': [min(d for ic in dendro['icoord'] for d in ic) - 2,
+                                     max(d for ic in dendro['icoord'] for d in ic) + 2],
+                           'anchor': 'x3'},
+            }
+        else:
+            # Fallback: simple heatmap without dendrograms
+            traces = [{'type': 'heatmap',
+                       'z': corr_ordered.tolist(),
+                       'x': ordered_names, 'y': ordered_names,
+                       'text': text_vals, 'texttemplate': '%{text}',
+                       'textfont': {'size': 11},
+                       'colorscale': 'RdYlBu', 'reversescale': True,
+                       'zmin': 0.9, 'zmax': 1.0,
+                       'hovertemplate': '%{y} vs %{x}<br>r = %{z:.4f}'}]
+            layout = {'title': {'text': 'Sample Correlation (Pearson, clustered)', 'font': {'size': 13}},
+                      'height': max(320, n * 70 + 80),
+                      'margin': {'t': 45, 'b': 50, 'l': 90, 'r': 15},
+                      'xaxis': {'automargin': True, 'tickfont': {'size': 10}},
+                      'yaxis': {'autorange': 'reversed', 'automargin': True,
+                                'tickfont': {'size': 10}}}
         return self._plotly_div(traces, layout)
 
     # ------------------------------------------------------------------
@@ -853,10 +949,10 @@ class MAGeCKHTMLReport:
         top_enr = np.where(pos_mask)[0][np.argsort(pos_fdr[pos_mask])][:20].tolist() if pos_mask.any() else []
         top_dep = np.where(neg_mask)[0][np.argsort(neg_fdr[neg_mask])][:20].tolist() if neg_mask.any() else []
         vdata = {'g': genes.tolist(),
-                 'lfc': np.round(lfc, 3).tolist(),
-                 'y': np.round(y, 2).tolist(),
-                 'nf': np.round(neg_fdr, 4).tolist(),
-                 'pf': np.round(pos_fdr, 4).tolist(),
+                 'lfc': np.round(lfc, 2).tolist(),
+                 'y': np.round(y, 1).tolist(),
+                 'nf': np.round(neg_fdr, 3).tolist(),
+                 'pf': np.round(pos_fdr, 3).tolist(),
                  'top_enr': top_enr, 'top_dep': top_dep}
         return self._volcano_html(div_id, vdata, label + ': Volcano',
                                   'Log2 Fold Change', '-log10(FDR)', 'LFC',
@@ -883,10 +979,10 @@ class MAGeCKHTMLReport:
         top_enr = np.where(pos_mask)[0][np.argsort(fdr[pos_mask])][:20].tolist() if pos_mask.any() else []
         top_dep = np.where(neg_mask)[0][np.argsort(fdr[neg_mask])][:20].tolist() if neg_mask.any() else []
         vdata = {'g': genes.tolist(),
-                 'lfc': np.round(beta, 3).tolist(),
-                 'y': np.round(y, 2).tolist(),
-                 'nf': np.round(fdr, 4).tolist(),
-                 'pf': np.round(fdr, 4).tolist(),
+                 'lfc': np.round(beta, 2).tolist(),
+                 'y': np.round(y, 1).tolist(),
+                 'nf': np.round(fdr, 3).tolist(),
+                 'pf': np.round(fdr, 3).tolist(),
                  'top_enr': top_enr, 'top_dep': top_dep}
         baseline_name = self._get_baseline_name()
         title = condition + ' vs ' + baseline_name + ' (Normalized Beta)'
@@ -923,6 +1019,8 @@ class MAGeCKHTMLReport:
         depleted = sig & (vy < 0)
         enriched = sig & (vy > 0)
         ns = ~(depleted | enriched)
+        vx = np.round(vx, 2)
+        vy = np.round(vy, 2)
         traces = []
         ht = 'Gene: %{text}<br>' + name_x + ': %{x:.3f}<br>' + name_y + ': %{y:.3f}'
         if ns.any():
@@ -1032,6 +1130,8 @@ class MAGeCKHTMLReport:
             slope, intercept = coeffs[0], coeffs[1]
         else:
             slope, intercept = 1.0, 0.0
+        vx_f = np.round(vx_f, 2)
+        vy_f = np.round(vy_f, 2)
         lims = [min(vx_f.min(), vy_f.min()) - 0.2, max(vx_f.max(), vy_f.max()) + 0.2]
         reg_x = [lims[0], lims[1]]
         reg_y = [slope * lims[0] + intercept, slope * lims[1] + intercept]
@@ -1076,8 +1176,8 @@ class MAGeCKHTMLReport:
         div_id = self._next_id('sel')
         sdata = {
             'g': genes[mask].tolist(),
-            'vx': np.round(vx[mask], 4).tolist(),
-            'vy': np.round(vy[mask], 4).tolist(),
+            'vx': np.round(vx[mask], 2).tolist(),
+            'vy': np.round(vy[mask], 2).tolist(),
             'ctrl': ctrl_name, 'treat': treat_name,
         }
         html = []
@@ -1111,8 +1211,8 @@ class MAGeCKHTMLReport:
         div_id = self._next_id('nsq')
         ndata = {
             'g': genes[mask].tolist(),
-            'vx': np.round(vx[mask], 4).tolist(),
-            'vy': np.round(vy[mask], 4).tolist(),
+            'vx': np.round(vx[mask], 2).tolist(),
+            'vy': np.round(vy[mask], 2).tolist(),
             'ctrl': ctrl_name, 'treat': treat_name,
         }
         html = []
@@ -1205,23 +1305,23 @@ class MAGeCKHTMLReport:
                    'marker': {'size': sizes,
                               'color': show['score'].tolist(),
                               'colorscale': cscale,
-                              'colorbar': {'title': {'text': 'ORA Score', 'font': {'size': 10}},
-                                           'len': 0.5, 'thickness': 12,
-                                           'tickfont': {'size': 9},
-                                           'x': 1.02, 'xpad': 5},
+                              'colorbar': {'title': {'text': 'ORA Score', 'font': {'size': 9}},
+                                           'len': 0.4, 'thickness': 12,
+                                           'tickfont': {'size': 8},
+                                           'x': 0.82, 'xpad': 3,
+                                           'y': 0.8, 'yanchor': 'middle'},
                               'line': {'width': 1.2, 'color': marker_line_color},
                               'opacity': 0.85},
                    'text': ['-log10(padj)={:.2f}'.format(v) for v in neg_log_p],
                    'hovertemplate': '%{y}<br>ORA Score: %{x:.3f}<br>%{text}',
                    'showlegend': False}]
 
-        # Size legend: add invisible reference dots on a secondary x-axis
+        # Size legend: reference dots as paper-coordinate annotations (right side, near colorbar)
         ref_vals = []
         if max_nlp > 2:
             ref_vals = [round(min_nlp + (max_nlp - min_nlp) * f, 1) for f in [0.0, 0.5, 1.0]]
         elif max_nlp > 0:
             ref_vals = [round(min_nlp, 1), round(max_nlp, 1)]
-        # Deduplicate reference values
         seen_rv = set()
         unique_rv = []
         for rv in ref_vals:
@@ -1230,19 +1330,19 @@ class MAGeCKHTMLReport:
                 unique_rv.append(rv)
         ref_vals = unique_rv
 
-        # Build size legend as a separate trace positioned below the plot
+        # Build size legend as scatter on xaxis2 placed to the right (near colorbar)
         if ref_vals:
             ref_sizes = [max(8, v / max_nlp * 28) for v in ref_vals]
-            x_pos = list(range(len(ref_vals)))
+            y_pos = list(range(len(ref_vals)))
             traces.append({
                 'type': 'scatter', 'mode': 'markers+text',
-                'x': x_pos, 'y': [0] * len(ref_vals),
+                'x': [0] * len(ref_vals), 'y': y_pos,
                 'marker': {'size': ref_sizes,
                            'color': marker_line_color,
                            'opacity': 0.5,
                            'line': {'width': 1, 'color': marker_line_color}},
                 'text': ['%.1f' % v for v in ref_vals],
-                'textposition': 'bottom center',
+                'textposition': 'middle right',
                 'textfont': {'size': 8, 'color': '#555'},
                 'hoverinfo': 'skip',
                 'showlegend': False,
@@ -1252,29 +1352,29 @@ class MAGeCKHTMLReport:
         annotations = []
         if ref_vals:
             annotations.append({
-                'text': '<b>Dot size = -log\u2081\u2080(adj. p)</b>',
-                'xref': 'x2', 'yref': 'y2',
-                'x': -0.8, 'y': 0, 'showarrow': False,
-                'font': {'size': 9, 'color': '#555'}})
+                'text': '<b>-log\u2081\u2080(p)</b>',
+                'xref': 'x2 domain', 'yref': 'y2 domain',
+                'x': 0.5, 'y': 1.15, 'showarrow': False,
+                'font': {'size': 8, 'color': '#555'}})
 
         n_pathways = len(show)
         plot_h = max(270, n_pathways * 24 + 100)
-        legend_frac = 50.0 / plot_h  # ~50px for size legend row
 
-        layout = {'title': {'text': title, 'font': {'size': 12}},
+        layout = {'title': {'text': title, 'font': {'size': 12},
+                            'y': 0.98, 'yanchor': 'top', 'pad': {'t': 10}},
                   'xaxis': {'title': 'ORA Enrichment Score', 'automargin': True,
                             'tickfont': {'size': 9},
-                            'domain': [0, 0.85]},
+                            'domain': [0, 0.78]},
                   'yaxis': {'automargin': True, 'tickfont': {'size': 9},
-                            'domain': [legend_frac, 1.0]},
-                  'xaxis2': {'anchor': 'y2', 'domain': [0.15, 0.65],
-                             'showgrid': False, 'zeroline': False,
-                             'showticklabels': False},
-                  'yaxis2': {'anchor': 'x2', 'domain': [0, legend_frac * 0.7],
+                            'domain': [0, 1.0]},
+                  'xaxis2': {'anchor': 'y2', 'domain': [0.88, 0.98],
                              'showgrid': False, 'zeroline': False,
                              'showticklabels': False, 'fixedrange': True},
-                  'height': plot_h + 50,
-                  'margin': {'l': 10, 't': 40, 'b': 30, 'r': 100},
+                  'yaxis2': {'anchor': 'x2', 'domain': [0.05, 0.45],
+                             'showgrid': False, 'zeroline': False,
+                             'showticklabels': False, 'fixedrange': True},
+                  'height': plot_h,
+                  'margin': {'l': 10, 't': 50, 'b': 30, 'r': 80},
                   'annotations': annotations}
 
         if div_id is None:
@@ -1351,7 +1451,7 @@ class MAGeCKHTMLReport:
         df_slim = df.copy()
         for col in df_slim.columns:
             if df_slim[col].dtype in ('float64', 'float32'):
-                df_slim[col] = df_slim[col].round(4)
+                df_slim[col] = df_slim[col].round(3)
         col_keys = [c['key'] for c in columns]
         col_vals = []
         for _, row in df_slim.iterrows():
@@ -1507,10 +1607,6 @@ class MAGeCKHTMLReport:
                 html.append('<tr><td>Count Table:</td><td>{}</td></tr>'.format(
                     os.path.basename(self.count_table_path)))
             html.append('</table></div>')
-
-        if self.design_matrix_df is not None:
-            html.append('<h3>Design Matrix</h3>')
-            html.append(self._df_to_html_table(self.design_matrix_df))
 
         if self.rra_gene_summaries:
             html.append('<h3>RRA Comparisons Detected</h3><ul>')
@@ -1858,7 +1954,7 @@ class MAGeCKHTMLReport:
             vals = np.array([float(row[s]) if pd.notna(row[s]) else 0.0 for s in self.sample_names])
             log_vals = np.log2(vals + 1)
             mean_log = log_vals.mean()
-            lfc_vals = np.round(log_vals - mean_log, 2).tolist()
+            lfc_vals = np.round(log_vals - mean_log, 1).tolist()
             entry = [sgrna] + lfc_vals
             if gene not in genes_data:
                 genes_data[gene] = []
@@ -2264,33 +2360,32 @@ function updateEnrichment(divId,geneList,totalGenes,direction){
   marker:{size:show.map(function(r){return Math.max(8,r.nlp/(maxNlp||1)*28);}),
    color:show.map(function(r){return r.fold;}),
    colorscale:isCold?[[0,"#D1E5F0"],[0.5,"#4393C3"],[1,"#053061"]]:[[0,"#FDDBC7"],[0.5,"#D6604D"],[1,"#67001F"]],
-   colorbar:{title:{text:"Fold Enrich.",font:{size:9}},len:0.5,thickness:12,tickfont:{size:8},x:1.02,xpad:5},
+   colorbar:{title:{text:"Fold Enrich.",font:{size:9}},len:0.4,thickness:12,tickfont:{size:8},x:0.82,xpad:3,y:0.8,yanchor:"middle"},
    line:{width:1.2,color:lineCol},opacity:0.85},
   text:show.map(function(r){return"Overlap: "+r.overlap+", -log10(p)\u2248"+r.nlp.toFixed(1);}),
   hovertemplate:"%{y}<br>Fold Enrichment: %{x:.2f}<br>%{text}",showlegend:false}];
- /* Size legend reference dots */
+ /* Size legend reference dots — placed on right side near colorbar */
  var refV=[];
  if(maxNlp>2){refV=[Math.round(minNlp*10)/10,Math.round((minNlp+(maxNlp-minNlp)*0.5)*10)/10,Math.round(maxNlp*10)/10];}
  else if(maxNlp>0){refV=[Math.round(minNlp*10)/10,Math.round(maxNlp*10)/10];}
  var uniqR=[],seenR={};refV.forEach(function(v){if(!seenR[v]){seenR[v]=1;uniqR.push(v);}});refV=uniqR;
  if(refV.length>0){
   traces.push({type:"scatter",mode:"markers+text",
-   x:refV.map(function(v,i){return i;}),y:refV.map(function(){return 0;}),
+   x:refV.map(function(){return 0;}),y:refV.map(function(v,i){return i;}),
    marker:{size:refV.map(function(v){return Math.max(8,v/(maxNlp||1)*28);}),color:lineCol,opacity:0.5,line:{width:1,color:lineCol}},
-   text:refV.map(function(v){return v.toFixed(1);}),textposition:"bottom center",textfont:{size:8,color:"#555"},
+   text:refV.map(function(v){return v.toFixed(1);}),textposition:"middle right",textfont:{size:8,color:"#555"},
    hoverinfo:"skip",showlegend:false,xaxis:"x2",yaxis:"y2"});
  }
- var pH=Math.max(270,show.length*24+100)+50;
- var lf=50/pH;
+ var pH=Math.max(270,show.length*24+100);
  var anns2=[];
- if(refV.length>0){anns2.push({text:"<b>Dot size = -log\u2081\u2080(p)</b>",xref:"x2",yref:"y2",x:-0.8,y:0,showarrow:false,font:{size:9,color:"#555"}});}
+ if(refV.length>0){anns2.push({text:"<b>-log\u2081\u2080(p)</b>",xref:"x2 domain",yref:"y2 domain",x:0.5,y:1.15,showarrow:false,font:{size:8,color:"#555"}});}
  var ttl=(direction==="depleted"?"Depleted":"Enriched")+" Genes: Hallmark Pathways (n="+geneList.length+")";
- Plotly.react(divId,traces,{title:{text:ttl,font:{size:12}},
-  xaxis:{title:"Fold Enrichment",automargin:true,tickfont:{size:9},domain:[0,0.85]},
-  yaxis:{automargin:true,tickfont:{size:9},domain:[lf,1.0]},
-  xaxis2:{anchor:"y2",domain:[0.15,0.65],showgrid:false,zeroline:false,showticklabels:false},
-  yaxis2:{anchor:"x2",domain:[0,lf*0.7],showgrid:false,zeroline:false,showticklabels:false,fixedrange:true},
-  height:pH,margin:{l:10,t:40,b:30,r:100},annotations:anns2},CONFIG);
+ Plotly.react(divId,traces,{title:{text:ttl,font:{size:12},y:0.98,yanchor:"top",pad:{t:10}},
+  xaxis:{title:"Fold Enrichment",automargin:true,tickfont:{size:9},domain:[0,0.78]},
+  yaxis:{automargin:true,tickfont:{size:9},domain:[0,1.0]},
+  xaxis2:{anchor:"y2",domain:[0.88,0.98],showgrid:false,zeroline:false,showticklabels:false,fixedrange:true},
+  yaxis2:{anchor:"x2",domain:[0.05,0.45],showgrid:false,zeroline:false,showticklabels:false,fixedrange:true},
+  height:pH,margin:{l:10,t:50,b:30,r:80},annotations:anns2},CONFIG);
 }
 /* Interactive selection scatter */
 function drawSelection(divId){
