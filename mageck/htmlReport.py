@@ -423,13 +423,23 @@ class MAGeCKHTMLReport:
             self.countsummary_df = pd.read_csv(cs_candidate, sep='\t')
             logging.info('Loaded count summary: %s', cs_candidate)
 
-        # Detect MAGeCK log files
+        # Detect MAGeCK log files.
+        # MAGeCK writes {output_prefix}.log via logging.basicConfig() in
+        # argsParser.py (count/test) and mleargparse.py (mle).
+        # Collect ALL .log files in the results directory so the download
+        # section includes logs from every pipeline step (count, test, mle).
+        seen_logs = set()
+        # Prefer the exact prefix match first (appears at top of list)
         log_candidate = self.output_prefix + '.log'
         if os.path.isfile(log_candidate):
+            rp = os.path.realpath(log_candidate)
+            seen_logs.add(rp)
             self._log_files.append((os.path.basename(log_candidate), log_candidate))
-        else:
-            log_files = sorted(glob.glob(os.path.join(base_dir, '*.log')))
-            for lf in log_files:
+        # Also include any other .log files in the same directory
+        for lf in sorted(glob.glob(os.path.join(base_dir, '*.log'))):
+            rp = os.path.realpath(lf)
+            if rp not in seen_logs:
+                seen_logs.add(rp)
                 self._log_files.append((os.path.basename(lf), lf))
         if self._log_files:
             logging.info('Detected %d log file(s)', len(self._log_files))
@@ -729,7 +739,7 @@ class MAGeCKHTMLReport:
                      for s in self.sample_names]
         colors = _QUAL_COLORS[:len(self.sample_names)]
         traces = [{'type': 'bar', 'x': self.sample_names, 'y': ginis,
-                   'text': ['{:.3f}'.format(g) for g in ginis],
+                   'text': ['{:.4f}'.format(g) for g in ginis],
                    'textposition': 'outside', 'cliponaxis': False,
                    'textfont': {'size': 10},
                    'marker': {'color': colors}}]
@@ -785,6 +795,7 @@ class MAGeCKHTMLReport:
             dist = 1.0 - corr
             np.fill_diagonal(dist, 0)
             dist = np.clip(dist, 0, None)
+            dist = (dist + dist.T) / 2  # force symmetry for floating-point precision
             condensed = squareform(dist)
             Z = linkage(condensed, method='average')
             sample_order = leaves_list(Z).tolist()

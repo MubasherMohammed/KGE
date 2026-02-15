@@ -38,6 +38,8 @@ def mageckmle_main(pvargs=None,parsedargs=None,returndict=False):
     args=parsedargs
   else:
     args=mageckmle_parseargs(pvargs)
+  # Save original design matrix file path before postargs overwrites it
+  _dm_file_path=getattr(args,'design_matrix',None)
   args=mageckmle_postargs(args)
   # Bayes module
   if hasattr(args,'bayes') and args.bayes:
@@ -235,8 +237,9 @@ def mageckmle_main(pvargs=None,parsedargs=None,returndict=False):
   if hasattr(args,'html_report') and args.html_report:
     from mageck.htmlReport import MAGeCKHTMLReport
     import os as _os
-    _dm=getattr(args,'design_matrix',None)
-    _dm_path=_dm if (isinstance(_dm, str) and _os.path.isfile(_dm)) else None
+    # Use saved file path (_dm_file_path) since args.design_matrix
+    # is overwritten with numpy matrix by mageckmle_postargs()
+    _dm_path=_dm_file_path if (isinstance(_dm_file_path, str) and _os.path.isfile(_dm_file_path)) else None
     _report=MAGeCKHTMLReport(output_prefix=args.output_prefix,
                              count_table=getattr(args,'count_table',None),
                              design_matrix=_dm_path)
