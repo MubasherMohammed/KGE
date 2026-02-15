@@ -528,15 +528,41 @@ class MAGeCKHTMLReport:
         base = os.path.basename(filepath)
         return base.replace('.gene_summary.txt', '').replace('.sgrna_summary.txt', '')
 
+    @staticmethod
+    def _group_name(sample_names):
+        """Derive group name from sample names by finding the common prefix.
+
+        E.g. ['ETP_R1', 'ETP_R2'] -> 'ETP', ['LTP_R1'] -> 'LTP'.
+        Strips trailing separators (_-, digits, R/rep labels).
+        """
+        import re
+        if not sample_names:
+            return ''
+        names = [str(n) for n in sample_names]
+        if len(names) == 1:
+            # Single sample: strip replicate suffix if present
+            return re.sub(r'[_\-]?[Rr](?:ep)?[_\-]?\d+$', '', names[0]) or names[0]
+        # Find longest common prefix
+        prefix = names[0]
+        for n in names[1:]:
+            while not n.startswith(prefix):
+                prefix = prefix[:-1]
+                if not prefix:
+                    break
+        # Strip trailing separator and partial replicate labels (e.g. _R, _rep, _r)
+        prefix = re.sub(r'[_\-]?[Rr](?:ep)?[_\-]?$', '', prefix)
+        prefix = re.sub(r'[_\-]+$', '', prefix)
+        return prefix if prefix else ', '.join(names)
+
     def _condition_to_sample(self, cond):
-        """Map MLE condition name to ALL matching sample names from design matrix."""
+        """Map MLE condition name to group name using design matrix."""
         if self.design_matrix_df is not None:
             sample_col = self.design_matrix_df.columns[0]
             if cond in self.design_matrix_df.columns:
                 mask = self.design_matrix_df[cond] == 1
                 if mask.any():
                     names = self.design_matrix_df.loc[mask, sample_col].values.tolist()
-                    return ', '.join(str(n) for n in names)
+                    return self._group_name(names)
         return cond
 
     # ------------------------------------------------------------------
@@ -592,22 +618,20 @@ class MAGeCKHTMLReport:
                      '(FLUTE cell-cycle style)', n_present)
 
     def _get_baseline_name(self):
-        """Return baseline (control-only) sample names from the design matrix.
+        """Return baseline group name from the design matrix.
 
-        Baseline samples are those where all treatment condition columns are 0,
-        i.e. samples with only the baseline/intercept coefficient.
+        Baseline = samples where all treatment condition columns are 0.
+        Returns the derived group name (e.g. 'ETP' from ETP_R1, ETP_R2).
         """
         if self.design_matrix_df is not None:
             cols = list(self.design_matrix_df.columns)
             sample_col = cols[0]
-            # Treatment columns = all columns except sample name and baseline
             treat_cols = [c for c in cols[1:] if c.lower() != 'baseline']
             if treat_cols:
-                # Baseline samples = rows where ALL treatment columns are 0
                 mask = (self.design_matrix_df[treat_cols] == 0).all(axis=1)
                 if mask.any():
                     names = self.design_matrix_df.loc[mask, sample_col].values.tolist()
-                    return ', '.join(str(n) for n in names)
+                    return self._group_name(names)
         return 'baseline'
 
     # ------------------------------------------------------------------
