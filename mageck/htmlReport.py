@@ -529,13 +529,14 @@ class MAGeCKHTMLReport:
         return base.replace('.gene_summary.txt', '').replace('.sgrna_summary.txt', '')
 
     def _condition_to_sample(self, cond):
-        """Map MLE condition name to sample name using design matrix."""
+        """Map MLE condition name to ALL matching sample names from design matrix."""
         if self.design_matrix_df is not None:
             sample_col = self.design_matrix_df.columns[0]
             if cond in self.design_matrix_df.columns:
                 mask = self.design_matrix_df[cond] == 1
                 if mask.any():
-                    return str(self.design_matrix_df.loc[mask, sample_col].values[0])
+                    names = self.design_matrix_df.loc[mask, sample_col].values.tolist()
+                    return ', '.join(str(n) for n in names)
         return cond
 
     # ------------------------------------------------------------------
@@ -591,14 +592,22 @@ class MAGeCKHTMLReport:
                      '(FLUTE cell-cycle style)', n_present)
 
     def _get_baseline_name(self):
-        """Return the baseline sample name from the design matrix."""
+        """Return baseline (control-only) sample names from the design matrix.
+
+        Baseline samples are those where all treatment condition columns are 0,
+        i.e. samples with only the baseline/intercept coefficient.
+        """
         if self.design_matrix_df is not None:
             cols = list(self.design_matrix_df.columns)
             sample_col = cols[0]
-            if 'baseline' in cols:
-                mask = self.design_matrix_df['baseline'] == 1
+            # Treatment columns = all columns except sample name and baseline
+            treat_cols = [c for c in cols[1:] if c.lower() != 'baseline']
+            if treat_cols:
+                # Baseline samples = rows where ALL treatment columns are 0
+                mask = (self.design_matrix_df[treat_cols] == 0).all(axis=1)
                 if mask.any():
-                    return str(self.design_matrix_df.loc[mask, sample_col].values[0])
+                    names = self.design_matrix_df.loc[mask, sample_col].values.tolist()
+                    return ', '.join(str(n) for n in names)
         return 'baseline'
 
     # ------------------------------------------------------------------
