@@ -1312,7 +1312,11 @@ class MAGeCKHTMLReport:
             return None
 
     def _run_ora(self, gene_list, all_genes):
-        """Run ORA on gene_list against hallmark gene sets."""
+        """Run ORA on gene_list against hallmark gene sets.
+
+        Returns DataFrame with columns: source, score, padj,
+        overlap_genes (comma-separated), overlap_count, pathway_size.
+        """
         net = self._fetch_hallmark_net()
         if net is None or len(gene_list) == 0:
             return None
@@ -1332,6 +1336,22 @@ class MAGeCKHTMLReport:
                 res['padj'] = padjs_df.iloc[0].values
             else:
                 res['padj'] = np.nan
+
+            # Compute overlap genes per pathway
+            pathway_genes = net.groupby('source')['target'].apply(set).to_dict()
+            overlap_genes_list = []
+            overlap_counts = []
+            pathway_sizes = []
+            for pw in res['source']:
+                pw_genes = pathway_genes.get(pw, set())
+                overlap = sorted(sig_set & pw_genes)
+                overlap_genes_list.append(', '.join(overlap))
+                overlap_counts.append(len(overlap))
+                pathway_sizes.append(len(pw_genes))
+            res['overlap_genes'] = overlap_genes_list
+            res['overlap_count'] = overlap_counts
+            res['pathway_size'] = pathway_sizes
+
             res = res.dropna(subset=['padj']).sort_values('padj').reset_index(drop=True)
             return res
         except Exception as e:
@@ -1365,6 +1385,34 @@ class MAGeCKHTMLReport:
         # Truncate long pathway names for readability
         y_labels = [_trunc(n) for n in show['source'].tolist()]
 
+        # Build rich hover text with fold enrichment, overlap, and genes
+        has_overlap = 'overlap_count' in show.columns and 'pathway_size' in show.columns
+        hover_texts = []
+        for idx, (_, row) in enumerate(show.iterrows()):
+            parts = ['-log10(padj)={:.2f}'.format(neg_log_p[idx])]
+            if has_overlap:
+                oc = int(row.get('overlap_count', 0))
+                ps = int(row.get('pathway_size', 0))
+                fe = (oc / ps) if ps > 0 else 0
+                parts.append('Fold Enrichment: {:.2f}'.format(fe))
+                parts.append('Overlap: {}/{}'.format(oc, ps))
+                genes_str = str(row.get('overlap_genes', ''))
+                if genes_str:
+                    # Wrap gene list for readability (max ~60 chars per line)
+                    gene_items = [g.strip() for g in genes_str.split(',')]
+                    wrapped = []
+                    line = ''
+                    for g in gene_items:
+                        if line and len(line) + len(g) + 2 > 60:
+                            wrapped.append(line)
+                            line = g
+                        else:
+                            line = (line + ', ' + g) if line else g
+                    if line:
+                        wrapped.append(line)
+                    parts.append('Genes: ' + '<br>'.join(wrapped))
+            hover_texts.append('<br>'.join(parts))
+
         traces = [{'type': 'scatter', 'mode': 'markers',
                    'x': show['score'].tolist(),
                    'y': y_labels,
@@ -1378,8 +1426,8 @@ class MAGeCKHTMLReport:
                                            'y': 0.8, 'yanchor': 'middle'},
                               'line': {'width': 1.2, 'color': marker_line_color},
                               'opacity': 0.85},
-                   'text': ['-log10(padj)={:.2f}'.format(v) for v in neg_log_p],
-                   'hovertemplate': '%{y}<br>ORA Score: %{x:.3f}<br>%{text}',
+                   'text': hover_texts,
+                   'hovertemplate': '%{y}<br>ORA Score: %{x:.3f}<br>%{text}<extra></extra>',
                    'showlegend': False}]
 
         # Size legend: reference dots as paper-coordinate annotations (right side, near colorbar)
@@ -1447,16 +1495,25 @@ class MAGeCKHTMLReport:
             div_id = self._next_id('enr')
         plot_html = self._plotly_div(traces, layout, div_id=div_id)
 
-        # Store enrichment data for download
+        # Store enrichment data for download (including gene lists)
         self._enrichment_counter += 1
         ekey = 'enr_%d' % self._enrichment_counter
         store_rows = []
         for _, row in ora_df.iterrows():
-            store_rows.append({
+            entry = {
                 'Pathway': row['source'],
                 'ORA_Score': float(row['score']) if pd.notna(row['score']) else None,
                 'Adjusted_P_Value': float(row['padj']) if pd.notna(row['padj']) else None,
-            })
+            }
+            if 'overlap_count' in ora_df.columns:
+                oc = int(row.get('overlap_count', 0))
+                ps = int(row.get('pathway_size', 0))
+                entry['Overlap_Count'] = oc
+                entry['Pathway_Size'] = ps
+                entry['Fold_Enrichment'] = round(oc / ps, 4) if ps > 0 else 0
+            if 'overlap_genes' in ora_df.columns:
+                entry['Genes'] = str(row.get('overlap_genes', ''))
+            store_rows.append(entry)
         self._enrichment_store[ekey] = store_rows
         safe_fn = title.replace(' ', '_').replace(':', '').replace('|', '_')
         dl_btn = ('<div style="text-align:right;margin-top:-5px;margin-bottom:10px;">'
@@ -2636,9 +2693,14 @@ function downloadFilteredCSV(tableId,filename){
 function dlEnr(key,filename){
  if(typeof ENR_DATA==="undefined"||!ENR_DATA[key])return;
  var rows=ENR_DATA[key];
- var lines=["Pathway,ORA_Score,Adjusted_P_Value"];
+ var hasGenes=rows.length>0&&rows[0].Genes!==undefined;
+ var hdr="Pathway,ORA_Score,Adjusted_P_Value";
+ if(hasGenes)hdr+=",Overlap_Count,Pathway_Size,Fold_Enrichment,Genes";
+ var lines=[hdr];
  rows.forEach(function(r){
-  lines.push('"'+r.Pathway+'",'+(r.ORA_Score!=null?r.ORA_Score:"")+","+(r.Adjusted_P_Value!=null?r.Adjusted_P_Value:""));
+  var line='"'+r.Pathway+'",'+(r.ORA_Score!=null?r.ORA_Score:"")+","+(r.Adjusted_P_Value!=null?r.Adjusted_P_Value:"");
+  if(hasGenes){line+=","+(r.Overlap_Count!=null?r.Overlap_Count:"")+","+(r.Pathway_Size!=null?r.Pathway_Size:"")+","+(r.Fold_Enrichment!=null?r.Fold_Enrichment:"")+",\""+(r.Genes||"").replace(/"/g,'""')+"\"";}
+  lines.push(line);
  });
  var blob=new Blob([lines.join("\n")],{type:"text/csv;charset=utf-8;"});
  var url=URL.createObjectURL(blob);
