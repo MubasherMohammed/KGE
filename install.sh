@@ -41,20 +41,52 @@ if ! command -v conda &> /dev/null; then
     curl -fsSL -o "${MINICONDA_INSTALLER}" "${MINICONDA_URL}"
     chmod +x "${MINICONDA_INSTALLER}"
 
-    CONDA_PREFIX="${HOME}/miniconda3"
-    echo "  Installing to: ${CONDA_PREFIX}"
-    bash "${MINICONDA_INSTALLER}" -b -p "${CONDA_PREFIX}"
+    MINICONDA_DIR="${HOME}/miniconda3"
+    echo "  Installing to: ${MINICONDA_DIR}"
+    bash "${MINICONDA_INSTALLER}" -b -p "${MINICONDA_DIR}"
     rm -f "${MINICONDA_INSTALLER}"
 
-    # Initialize conda in this shell session
-    eval "$("${CONDA_PREFIX}/bin/conda" shell.bash hook)"
+    # Initialize conda for both bash and zsh (macOS defaults to zsh)
+    eval "$("${MINICONDA_DIR}/bin/conda" shell.bash hook)"
     conda init bash 2>/dev/null || true
+    conda init zsh  2>/dev/null || true
 
     echo "  Miniconda installed successfully."
-    echo "  NOTE: Restart your terminal or run 'source ~/.bashrc' after"
-    echo "        installation to use conda in future sessions."
+    echo "  Shell integration configured for bash and zsh."
+    echo "  (Restart your terminal for conda to be available in new sessions.)"
     echo ""
 fi
+
+# ---- Step 1b: Verify conda platform compatibility with MAGeCK ----
+CONDA_PYTHON="$(conda info --base)/bin/python"
+CONDA_PLATFORM="$(conda info --json 2>/dev/null | "${CONDA_PYTHON}" -c "import sys,json; print(json.load(sys.stdin)['platform'])" 2>/dev/null || echo "unknown")"
+echo "  Detected conda platform: ${CONDA_PLATFORM}"
+
+# MAGeCK 0.5.x from bioconda is available for linux-64 and osx-64.
+# On osx-arm64 (Apple Silicon), we need CONDA_SUBDIR=osx-64 to install
+# the x86_64 build under Rosetta 2 emulation.
+case "${CONDA_PLATFORM}" in
+    linux-64)
+        echo "  Platform linux-64: MAGeCK supported natively."
+        ;;
+    osx-64)
+        echo "  Platform osx-64: MAGeCK supported natively."
+        ;;
+    osx-arm64)
+        echo "  Platform osx-arm64 (Apple Silicon): MAGeCK not available natively."
+        echo "  Switching to osx-64 (Rosetta 2 emulation) for environment creation."
+        export CONDA_SUBDIR=osx-64
+        ;;
+    linux-aarch64)
+        echo "  Platform linux-aarch64: MAGeCK not available natively."
+        echo "  Switching to linux-64 emulation for environment creation."
+        export CONDA_SUBDIR=linux-64
+        ;;
+    *)
+        echo "WARNING: Unrecognised platform '${CONDA_PLATFORM}'."
+        echo "  Proceeding — environment creation may fail if MAGeCK is unavailable."
+        ;;
+esac
 
 # ---- Step 2: Create conda environment ----
 echo "[1/4] Creating conda environment '${ENV_NAME}'..."
