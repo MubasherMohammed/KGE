@@ -59,6 +59,8 @@ from mageck.version import __version__
 _QUAL_COLORS = [
     '#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A',
     '#19D3F3', '#FF6692', '#B6E880', '#FF97FF', '#FECB52',
+    '#1F77B4', '#FF7F0E', '#2CA02C', '#D62728', '#9467BD',
+    '#8C564B', '#E377C2', '#7F7F7F', '#BCBD22', '#17BECF',
 ]
 _PLOTLY_CDN = 'https://cdn.plot.ly/plotly-2.27.0.min.js'
 _PLOTLY_CONFIG = json.dumps({
@@ -170,11 +172,11 @@ _DESC = {
                       'mapped reads, and mapping rate per sample. Samples '
                       'with low mapping rates may indicate library mismatch '
                       'or sequencing issues.'),
-    'mle_beta_density': ('Distribution of gene-level beta scores for each MLE '
-                         'condition. Comparing density shapes reveals whether '
-                         'treatment induces broader selection effects relative '
-                         'to control. A wider distribution in the treatment '
-                         'condition indicates stronger selective pressure.'),
+    'mle_beta_density': ('Density of normalized gene beta scores (FLUTE '
+                         'cell-cycle method: beta / |median beta of core '
+                         'essential genes|). A wider distribution indicates '
+                         'stronger selective pressure. Comparing shapes across '
+                         'conditions reveals differential selection effects.'),
     'mle_consistency': ('Scatterplot of gene beta scores between treatment and '
                         'control conditions (ConsistencyView). The red line '
                         'shows the linear regression fit; the grey dashed '
@@ -188,17 +190,16 @@ _DESC = {
                               'with decreased beta after treatment; grey dots = '
                               'genes within the cutoff range. Diagonal lines show '
                               'the \u00b1cutoff boundary relative to y\u2009=\u2009x.'),
-    'mle_nine_square': ('Treatment-associated gene classification (nine-square). '
-                        '<b>Group 1 (green)</b>: strongly negatively selected in control '
-                        'but weakly selected in treatment \u2014 potential drug pathway targets. '
-                        '<b>Group 2 (orange)</b>: weakly selected in control but strongly '
-                        'positively selected in treatment \u2014 possible drug resistance genes. '
-                        '<b>Group 3 (blue)</b>: strongly positively selected in control '
-                        'but weakly selected in treatment. '
-                        '<b>Group 4 (purple)</b>: weakly selected in control but strongly '
-                        'negatively selected in treatment \u2014 possibly synthetically lethal '
-                        'with treatment. Adjust the beta cutoff to change classification '
-                        'stringency.'),
+    'mle_nine_square': ('Condition-associated gene classification (nine-square). '
+                        '<b>Group 1 (green)</b>: strongly negatively selected in the first condition '
+                        'but weakly selected in the second \u2014 genes whose depletion is specific to the first condition. '
+                        '<b>Group 2 (orange)</b>: weakly selected in the first condition but strongly '
+                        'positively selected in the second \u2014 genes enriched specifically in the second condition. '
+                        '<b>Group 3 (blue)</b>: strongly positively selected in the first condition '
+                        'but weakly selected in the second \u2014 genes enriched specifically in the first condition. '
+                        '<b>Group 4 (purple)</b>: weakly selected in the first condition but strongly '
+                        'negatively selected in the second \u2014 genes whose depletion is specific to the second condition. '
+                        'Adjust the beta cutoff to change classification stringency.'),
 }
 
 
@@ -1146,7 +1147,8 @@ class MAGeCKHTMLReport:
     # ------------------------------------------------------------------
 
     def plot_mle_beta_density(self):
-        """Plot 1: Density distribution of beta scores for all MLE conditions."""
+        """Plot 1: Smooth KDE density of gene beta scores (already normalized by normalize_betas)."""
+        from scipy.stats import gaussian_kde
         df = self.mle_gene_summary
         if df is None or not self.mle_conditions:
             return None
@@ -1157,20 +1159,26 @@ class MAGeCKHTMLReport:
             if beta_col not in df.columns:
                 continue
             vals = df[beta_col].dropna().values.astype(float)
-            counts, edges = np.histogram(vals, bins=80, density=True)
-            centers = ((edges[:-1] + edges[1:]) / 2).tolist()
+            vals = vals[np.isfinite(vals)]
+            if len(vals) < 5:
+                continue
+            # Smooth KDE (betas already normalized via normalize_betas())
+            kde = gaussian_kde(vals)
+            x_min, x_max = vals.min() - 0.5, vals.max() + 0.5
+            x_grid = np.linspace(x_min, x_max, 200)
+            y_density = kde(x_grid)
             color = colors[i % len(colors)]
             sample_name = self._condition_to_sample(cond)
             traces.append({
                 'type': 'scatter', 'mode': 'lines',
-                'x': centers, 'y': counts.tolist(),
+                'x': x_grid.tolist(), 'y': y_density.tolist(),
                 'name': sample_name,
                 'line': {'color': color, 'width': 2.5}})
         if not traces:
             return None
         layout = {
-            'title': {'text': 'Distribution of Gene Beta Scores', 'font': {'size': 13}},
-            'xaxis': {'title': 'Beta Score', 'automargin': True, 'tickfont': {'size': 10}},
+            'title': {'text': 'Distribution of Normalized Gene Beta Scores', 'font': {'size': 13}},
+            'xaxis': {'title': 'Normalized Beta Score', 'automargin': True, 'tickfont': {'size': 10}},
             'yaxis': {'title': 'Density', 'automargin': True, 'tickfont': {'size': 10}},
             'legend': {'font': {'size': 11}},
             'height': 360, 'margin': {'t': 45, 'b': 40, 'l': 50, 'r': 10}}
@@ -1259,7 +1267,7 @@ class MAGeCKHTMLReport:
         return '\n'.join(html)
 
     def plot_mle_nine_square(self, cond_ctrl, cond_treat):
-        """Plot 4: FLUTE nine-square treatment gene classification."""
+        """Plot 4: Nine-square condition-associated gene classification."""
         df = self.mle_gene_summary
         bx_col = cond_ctrl + '|beta'
         by_col = cond_treat + '|beta'
@@ -2000,7 +2008,7 @@ class MAGeCKHTMLReport:
                         html.append('</div>')
                         html.append('</div>')
 
-            # FLUTE-like plots: Beta density, consistency, selection, nine-square (2-column grid)
+            # Beta score analysis plots: density, consistency, selection, nine-square (2-column grid)
             if len(self.mle_conditions) >= 1:
                 html.append('<h4>Beta Score Analysis (FLUTE-style)</h4>')
 
@@ -2539,16 +2547,16 @@ function drawSelection(divId){
   yaxis:{title:D.treat+" (beta)",automargin:true,tickfont:{size:10}},
   legend:{font:{size:10}},height:360,margin:{t:45,b:40,l:50,r:10},shapes:shapes},CONFIG);
 }
-/* FLUTE nine-square treatment gene classification */
+/* Nine-square condition-associated gene classification */
 function drawNineSquare(divId){
  var D=window["ND_"+divId];if(!D)return;
  var cut=parseFloat(document.getElementById("ncut-"+divId).value)||0;
  var ht="Gene: %{text}<br>"+D.ctrl+" (\u03b2): %{x:.3f}<br>"+D.treat+" (\u03b2): %{y:.3f}";
- /* 4 treatment groups + others */
- var g1={x:[],y:[],text:[]}, /* green: strong neg ctrl, weak treat -> drug targets */
-     g2={x:[],y:[],text:[]}, /* orange: weak ctrl, strong pos treat -> resistance */
-     g3={x:[],y:[],text:[]}, /* blue: strong pos ctrl, weak treat */
-     g4={x:[],y:[],text:[]}, /* purple: weak ctrl, strong neg treat -> synth lethal */
+ /* 4 condition groups + others */
+ var g1={x:[],y:[],text:[]}, /* green: strong neg 1st cond, weak 2nd */
+     g2={x:[],y:[],text:[]}, /* orange: weak 1st cond, strong pos 2nd */
+     g3={x:[],y:[],text:[]}, /* blue: strong pos 1st cond, weak 2nd */
+     g4={x:[],y:[],text:[]}, /* purple: weak 1st cond, strong neg 2nd */
      grey={x:[],y:[],text:[]};
  for(var i=0;i<D.g.length;i++){
   var x=D.vx[i],y=D.vy[i],ax=Math.abs(x),ay=Math.abs(y);
@@ -2561,10 +2569,10 @@ function drawNineSquare(divId){
  }
  var traces=[];
  if(grey.x.length)traces.push({type:"scattergl",mode:"markers",x:grey.x,y:grey.y,text:grey.text,marker:{color:"rgba(180,180,180,0.3)",size:4},hovertemplate:ht,name:"Others ("+grey.x.length+")"});
- if(g1.x.length)traces.push({type:"scattergl",mode:"markers",x:g1.x,y:g1.y,text:g1.text,marker:{color:"#27AE60",size:6,opacity:0.8},hovertemplate:ht,name:"G1: Drug Targets ("+g1.x.length+")"});
- if(g2.x.length)traces.push({type:"scattergl",mode:"markers",x:g2.x,y:g2.y,text:g2.text,marker:{color:"#E67E22",size:6,opacity:0.8},hovertemplate:ht,name:"G2: Resistance ("+g2.x.length+")"});
- if(g3.x.length)traces.push({type:"scattergl",mode:"markers",x:g3.x,y:g3.y,text:g3.text,marker:{color:"#3498DB",size:6,opacity:0.8},hovertemplate:ht,name:"G3: Pos. Ctrl Only ("+g3.x.length+")"});
- if(g4.x.length)traces.push({type:"scattergl",mode:"markers",x:g4.x,y:g4.y,text:g4.text,marker:{color:"#8E44AD",size:6,opacity:0.8},hovertemplate:ht,name:"G4: Synth. Lethal ("+g4.x.length+")"});
+ if(g1.x.length)traces.push({type:"scattergl",mode:"markers",x:g1.x,y:g1.y,text:g1.text,marker:{color:"#27AE60",size:6,opacity:0.8},hovertemplate:ht,name:"G1: Neg. "+D.ctrl+" Only ("+g1.x.length+")"});
+ if(g2.x.length)traces.push({type:"scattergl",mode:"markers",x:g2.x,y:g2.y,text:g2.text,marker:{color:"#E67E22",size:6,opacity:0.8},hovertemplate:ht,name:"G2: Pos. "+D.treat+" Only ("+g2.x.length+")"});
+ if(g3.x.length)traces.push({type:"scattergl",mode:"markers",x:g3.x,y:g3.y,text:g3.text,marker:{color:"#3498DB",size:6,opacity:0.8},hovertemplate:ht,name:"G3: Pos. "+D.ctrl+" Only ("+g3.x.length+")"});
+ if(g4.x.length)traces.push({type:"scattergl",mode:"markers",x:g4.x,y:g4.y,text:g4.text,marker:{color:"#8E44AD",size:6,opacity:0.8},hovertemplate:ht,name:"G4: Neg. "+D.treat+" Only ("+g4.x.length+")"});
  var allx=D.vx,ally=D.vy;
  var mn=Math.min(Math.min.apply(null,allx),Math.min.apply(null,ally))-0.3;
  var mx=Math.max(Math.max.apply(null,allx),Math.max.apply(null,ally))+0.3;
@@ -2601,7 +2609,7 @@ function drawNineSquare(divId){
   }
  }
  labelTop(g1,"#1E8449",-22);labelTop(g2,"#D35400",0);labelTop(g3,"#2471A3",22);labelTop(g4,"#6C3483",0);
- Plotly.react(divId,traces,{title:{text:"Nine-Square Treatment Classification: "+D.treat+" vs "+D.ctrl,font:{size:13}},
+ Plotly.react(divId,traces,{title:{text:"Nine-Square Classification: "+D.treat+" vs "+D.ctrl,font:{size:13}},
   xaxis:{title:D.ctrl+" (normalized \u03b2)",automargin:true,tickfont:{size:10},zeroline:true,zerolinecolor:"rgba(0,0,0,0.15)",zerolinewidth:1},
   yaxis:{title:D.treat+" (normalized \u03b2)",automargin:true,tickfont:{size:10},zeroline:true,zerolinecolor:"rgba(0,0,0,0.15)",zerolinewidth:1},
   legend:{font:{size:9},x:1.02,y:1,xanchor:"left"},height:480,margin:{t:45,b:45,l:55,r:160},shapes:shapes,annotations:anns},CONFIG);
