@@ -651,6 +651,29 @@ class MAGeCKHTMLReport:
         return ('<div id="' + div_id + '" class="plotly-chart"></div>\n'
                 '<script>Plotly.newPlot("' + div_id + '",' + t + ',' + l + ',' + _PLOTLY_CONFIG + ');</script>\n')
 
+    def _multi_panel_grid(self, plot_func, cond_ref, cond_comparisons):
+        """Generate a multi-panel grid of pairwise plots.
+
+        For a single comparison condition the plot is rendered inline (no grid
+        wrapper).  For two or more comparison conditions, each panel is placed
+        inside a ``plot-grid`` 2-column CSS grid.
+        """
+        parts = []
+        if len(cond_comparisons) == 1:
+            v = plot_func(cond_ref, cond_comparisons[0])
+            if v:
+                parts.append(v)
+        else:
+            parts.append('<div class="plot-grid">')
+            for cond in cond_comparisons:
+                parts.append('<div>')
+                v = plot_func(cond_ref, cond)
+                if v:
+                    parts.append(v)
+                parts.append('</div>')
+            parts.append('</div>')
+        return '\n'.join(parts)
+
     # ------------------------------------------------------------------
     # Section 1: QC Plots (compact, automargin)
     # ------------------------------------------------------------------
@@ -2008,57 +2031,45 @@ class MAGeCKHTMLReport:
                         html.append('</div>')
                         html.append('</div>')
 
-            # Beta score analysis plots: density, consistency, selection, nine-square (2-column grid)
+            # Beta score analysis plots: density, consistency, selection, nine-square
             if len(self.mle_conditions) >= 1:
                 html.append('<h4>Beta Score Analysis (FLUTE-style)</h4>')
 
             if len(self.mle_conditions) >= 2:
-                # Identify treatment/control pair
-                cond_ctrl = None
-                cond_treat = None
+                # Identify reference condition (control/baseline)
+                cond_ref = None
                 for c in self.mle_conditions:
                     cl = c.lower()
                     if 'dmso' in cl or 'control' in cl or 'baseline' in cl or 'untreated' in cl:
-                        cond_ctrl = c
-                if cond_ctrl is None:
-                    cond_ctrl = self.mle_conditions[0]
-                for c in self.mle_conditions:
-                    if c != cond_ctrl:
-                        cond_treat = c
-                        break
+                        cond_ref = c
+                if cond_ref is None:
+                    cond_ref = self.mle_conditions[0]
+                # All other conditions will be compared against the reference
+                cond_comparisons = [c for c in self.mle_conditions if c != cond_ref]
 
-                if cond_ctrl and cond_treat:
-                    # Row 1: Density + ConsistencyView
-                    html.append('<div class="plot-grid">')
-                    html.append('<div>')
-                    html.append(_desc_html('mle_beta_density'))
-                    v = self.plot_mle_beta_density()
-                    if v:
-                        html.append(v)
-                    html.append('</div>')
-                    html.append('<div>')
-                    html.append(_desc_html('mle_consistency'))
-                    v = self.plot_mle_consistency_scatter(cond_ctrl, cond_treat)
-                    if v:
-                        html.append(v)
-                    html.append('</div>')
-                    html.append('</div>')
+                # Density (full width — already shows all conditions)
+                html.append(_desc_html('mle_beta_density'))
+                v = self.plot_mle_beta_density()
+                if v:
+                    html.append(v)
 
-                    # Row 2: Selection scatter + Nine-square
-                    html.append('<div class="plot-grid">')
-                    html.append('<div>')
-                    html.append(_desc_html('mle_selection_scatter'))
-                    v = self.plot_mle_selection_scatter(cond_ctrl, cond_treat)
-                    if v:
-                        html.append(v)
-                    html.append('</div>')
-                    html.append('<div>')
-                    html.append(_desc_html('mle_nine_square'))
-                    v = self.plot_mle_nine_square(cond_ctrl, cond_treat)
-                    if v:
-                        html.append(v)
-                    html.append('</div>')
-                    html.append('</div>')
+                # ConsistencyView — one panel per comparison condition
+                html.append('<h5>ConsistencyView</h5>')
+                html.append(_desc_html('mle_consistency'))
+                html.append(self._multi_panel_grid(
+                    self.plot_mle_consistency_scatter, cond_ref, cond_comparisons))
+
+                # Selection Scatter
+                html.append('<h5>Selection Scatter</h5>')
+                html.append(_desc_html('mle_selection_scatter'))
+                html.append(self._multi_panel_grid(
+                    self.plot_mle_selection_scatter, cond_ref, cond_comparisons))
+
+                # Nine-Square Classification
+                html.append('<h5>Nine-Square Classification</h5>')
+                html.append(_desc_html('mle_nine_square'))
+                html.append(self._multi_panel_grid(
+                    self.plot_mle_nine_square, cond_ref, cond_comparisons))
 
             elif len(self.mle_conditions) == 1:
                 html.append(_desc_html('mle_beta_density'))
