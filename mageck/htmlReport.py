@@ -531,29 +531,54 @@ class MAGeCKHTMLReport:
 
     @staticmethod
     def _group_name(sample_names):
-        """Derive group name from sample names by finding the common prefix.
+        """Derive group name from sample names by finding a common part.
 
-        E.g. ['ETP_R1', 'ETP_R2'] -> 'ETP', ['LTP_R1'] -> 'LTP'.
-        Strips trailing separators (_-, digits, R/rep labels).
+        Handles both suffix-replicate and prefix-replicate conventions:
+          ['ETP_R1', 'ETP_R2']   -> 'ETP'   (common prefix)
+          ['R1_D11', 'R2_D11']   -> 'D11'   (common suffix)
+          ['LTP_R1']             -> 'LTP'   (single sample)
         """
         import re
         if not sample_names:
             return ''
         names = [str(n) for n in sample_names]
         if len(names) == 1:
-            # Single sample: strip replicate suffix if present
-            return re.sub(r'[_\-]?[Rr](?:ep)?[_\-]?\d+$', '', names[0]) or names[0]
-        # Find longest common prefix
+            # Single sample: strip replicate prefix or suffix if present
+            s = names[0]
+            # Try stripping trailing replicate label (e.g. _R1, _Rep2)
+            stripped = re.sub(r'[_\-]?[Rr](?:ep)?[_\-]?\d+$', '', s)
+            if stripped:
+                return stripped
+            # Try stripping leading replicate label (e.g. R1_, Rep2_)
+            stripped = re.sub(r'^[Rr](?:ep)?[_\-]?\d+[_\-]?', '', s)
+            return stripped or s
+        # --- Try common prefix first ---
         prefix = names[0]
         for n in names[1:]:
             while not n.startswith(prefix):
                 prefix = prefix[:-1]
                 if not prefix:
                     break
-        # Strip trailing separator and partial replicate labels (e.g. _R, _rep, _r)
-        prefix = re.sub(r'[_\-]?[Rr](?:ep)?[_\-]?$', '', prefix)
-        prefix = re.sub(r'[_\-]+$', '', prefix)
-        return prefix if prefix else ', '.join(names)
+        # Strip trailing separator and partial replicate labels
+        clean_pfx = re.sub(r'[_\-]?[Rr](?:ep)?[_\-]?$', '', prefix)
+        clean_pfx = re.sub(r'[_\-]+$', '', clean_pfx)
+        if clean_pfx:
+            return clean_pfx
+        # --- Prefix failed; try common suffix ---
+        rev = [n[::-1] for n in names]
+        suffix_r = rev[0]
+        for r in rev[1:]:
+            while not r.startswith(suffix_r):
+                suffix_r = suffix_r[:-1]
+                if not suffix_r:
+                    break
+        suffix = suffix_r[::-1]
+        # Strip leading separator and partial replicate labels
+        clean_sfx = re.sub(r'^[_\-]?[Rr](?:ep)?[_\-]?', '', suffix)
+        clean_sfx = re.sub(r'^[_\-]+', '', clean_sfx)
+        if clean_sfx:
+            return clean_sfx
+        return ', '.join(names)
 
     def _condition_to_sample(self, cond):
         """Map MLE condition name to group name using design matrix."""
