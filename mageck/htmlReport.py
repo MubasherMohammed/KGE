@@ -581,15 +581,56 @@ class MAGeCKHTMLReport:
         return ', '.join(names)
 
     def _condition_to_sample(self, cond):
-        """Map MLE condition name to group name using design matrix."""
-        if self.design_matrix_df is not None:
-            sample_col = self.design_matrix_df.columns[0]
-            if cond in self.design_matrix_df.columns:
-                mask = self.design_matrix_df[cond] == 1
-                if mask.any():
-                    names = self.design_matrix_df.loc[mask, sample_col].values.tolist()
-                    return self._group_name(names)
+        """Return the condition name directly for use as plot axis/hover labels."""
         return cond
+
+    def _get_comparison_ref(self, cond):
+        """Return the reference condition for a given MLE beta using design-matrix
+        structure — no assumptions about condition naming conventions.
+
+        Algorithm:
+          1. Among all other mle_conditions, find the column R whose set of 1-rows
+             strictly contains cond's 1-rows and has the fewest total 1-rows
+             (the 'tightest enclosing' parent in the nested factorial structure).
+          2. If no enclosing condition exists within mle_conditions (i.e. cond is
+             a top-level effect), the reference is the pure-baseline sample(s) —
+             rows in the design matrix where every condition column = 0.
+        """
+        if self.design_matrix_df is None:
+            return None
+
+        dm = self.design_matrix_df
+        cond_cols_in_dm = [c for c in self.mle_conditions if c in dm.columns]
+        if cond not in dm.columns or not cond_cols_in_dm:
+            return None
+
+        cond_rows = set(dm.index[dm[cond] == 1])
+        if not cond_rows:
+            return None
+
+        # Step 1: find tightest enclosing mle_condition
+        best_ref = None
+        best_count = float('inf')
+        for other in cond_cols_in_dm:
+            if other == cond:
+                continue
+            other_rows = set(dm.index[dm[other] == 1])
+            # other_rows must strictly contain cond_rows
+            if cond_rows < other_rows and len(other_rows) < best_count:
+                best_count = len(other_rows)
+                best_ref = other
+
+        if best_ref is not None:
+            return best_ref
+
+        # Step 2: top-level condition — reference is the pure-baseline sample(s)
+        sample_col = dm.columns[0]
+        mask = (dm[cond_cols_in_dm] == 0).all(axis=1)
+        baseline_samples = dm.loc[mask, sample_col].tolist()
+        if baseline_samples:
+            return ', '.join(str(s) for s in baseline_samples)
+
+        return None
 
     # ------------------------------------------------------------------
     # Normalization
@@ -620,6 +661,14 @@ class MAGeCKHTMLReport:
         For each condition, divides all betas by the absolute median beta
         of core essential genes.  This rescales so that the typical
         essential-gene depletion is -1, making conditions comparable.
+
+        IMPORTANT: normalization is only applied to top-level (fitness) conditions
+        whose reference is the baseline sample (e.g. ETP/plasmid).  Incremental
+        drug-effect conditions (reference = another MLE condition such as
+        Control_6d) are intentionally left on the raw beta scale because core
+        essential genes have no systematic depletion signal in drug-vs-control
+        comparisons — dividing by their near-zero median would amplify noise by
+        50–150×, producing meaningless density curves.
         """
         if self.mle_gene_summary is None or not self.mle_conditions:
             return
@@ -631,17 +680,28 @@ class MAGeCKHTMLReport:
             logging.warning('Only %d core essential genes found — skipping '
                             'beta normalization.', n_present)
             return
+        n_normalized = 0
         for cond in self.mle_conditions:
             beta_col = cond + '|beta'
             if beta_col not in df.columns:
+                continue
+            # Skip incremental conditions (drug vs timepoint-control).
+            # Only normalize top-level fitness conditions (reference = baseline).
+            ref = self._get_comparison_ref(cond)
+            if ref is not None and ref in self.mle_conditions:
+                logging.info('Skipping beta normalization for incremental '
+                             'condition %s (ref=%s)', cond, ref)
                 continue
             cc_betas = df.loc[present, beta_col].values.astype(float)
             cc_median = float(np.median(cc_betas[np.isfinite(cc_betas)]))
             if abs(cc_median) < 1e-6:
                 continue
             df[beta_col] = df[beta_col] / abs(cc_median)
-        logging.info('Beta scores normalized using %d essential genes '
-                     '(FLUTE cell-cycle style)', n_present)
+            n_normalized += 1
+        if n_normalized:
+            logging.info('Beta scores normalized using %d essential genes '
+                         '(FLUTE cell-cycle style, %d conditions)',
+                         n_present, n_normalized)
 
     def _get_baseline_name(self):
         """Return baseline group name from the design matrix.
@@ -1099,8 +1159,8 @@ class MAGeCKHTMLReport:
                  'nf': np.round(fdr, 6).tolist(),
                  'pf': np.round(fdr, 6).tolist(),
                  'top_enr': top_enr, 'top_dep': top_dep}
-        baseline_name = self._get_baseline_name()
-        title = condition + ' vs ' + baseline_name + ' (Normalized Beta)'
+        ref = self._get_comparison_ref(condition)
+        title = (condition + ' vs ' + ref if ref else condition) + ' (Beta)'
         return self._volcano_html(div_id, vdata, title,
                                   'Normalized Beta Score', '\u2212log\u2081\u2080(FDR)', 'Beta',
                                   table_id=table_id, enr_dep_div=enr_dep_div,
@@ -1990,7 +2050,7 @@ class MAGeCKHTMLReport:
             # Per-condition: FDR summary + volcano + line plot + enrichment
             for ci_idx, cond in enumerate(self.mle_conditions):
                 sample_name = self._condition_to_sample(cond)
-                cond_label = cond + ' vs ' + baseline_name
+                cond_label = cond
                 html.append('<h4>' + cond_label + '</h4>')
                 fdr_col = cond + '|wald-fdr'
                 if fdr_col not in df.columns:
@@ -2061,40 +2121,55 @@ class MAGeCKHTMLReport:
                 html.append('<h4>Beta Score Analysis (FLUTE-style)</h4>')
 
             if len(self.mle_conditions) >= 2:
-                # Identify reference condition (control/baseline)
-                cond_ref = None
+                # Build (ref, [treatments]) pairs purely from design-matrix structure.
+                # For each condition, its reference is its 'tightest enclosing' column
+                # (the mle_condition whose 1-rows strictly contain this condition's 1-rows
+                # with the fewest total 1-rows). Conditions are then grouped by reference.
+                # No naming-convention assumptions are made.
+                ref_of = {}
                 for c in self.mle_conditions:
-                    cl = c.lower()
-                    if 'dmso' in cl or 'control' in cl or 'baseline' in cl or 'untreated' in cl:
-                        cond_ref = c
-                if cond_ref is None:
-                    cond_ref = self.mle_conditions[0]
-                # All other conditions will be compared against the reference
-                cond_comparisons = [c for c in self.mle_conditions if c != cond_ref]
+                    ref_of[c] = self._get_comparison_ref(c)
 
-                # Density (full width — already shows all conditions)
+                # Group treatments (conditions that have another mle_condition as ref)
+                group_map = {}  # ref_cond -> [treatment_conds]
+                for c, ref in ref_of.items():
+                    if ref is not None and ref in self.mle_conditions:
+                        group_map.setdefault(ref, []).append(c)
+
+                # Preserve mle_conditions order for consistent output
+                pairs = [(ref, group_map[ref])
+                         for ref in self.mle_conditions
+                         if ref in group_map and group_map[ref]]
+
+                # Fallback: design matrix not loaded or no nesting found
+                if not pairs:
+                    cond_ref = self.mle_conditions[0]
+                    pairs = [(cond_ref, [c for c in self.mle_conditions if c != cond_ref])]
+
+                # Density (full width — shows all conditions)
                 html.append(_desc_html('mle_beta_density'))
                 v = self.plot_mle_beta_density()
                 if v:
                     html.append(v)
 
-                # ConsistencyView — one panel per comparison condition
-                html.append('<h5>ConsistencyView</h5>')
-                html.append(_desc_html('mle_consistency'))
-                html.append(self._multi_panel_grid(
-                    self.plot_mle_consistency_scatter, cond_ref, cond_comparisons))
+                # Per-group ConsistencyView, Selection Scatter, Nine-Square
+                for cond_ref, cond_comparisons in pairs:
+                    treats_label = ', '.join(cond_comparisons)
 
-                # Selection Scatter
-                html.append('<h5>Selection Scatter</h5>')
-                html.append(_desc_html('mle_selection_scatter'))
-                html.append(self._multi_panel_grid(
-                    self.plot_mle_selection_scatter, cond_ref, cond_comparisons))
+                    html.append('<h5>ConsistencyView — ' + treats_label + ' vs ' + cond_ref + '</h5>')
+                    html.append(_desc_html('mle_consistency'))
+                    html.append(self._multi_panel_grid(
+                        self.plot_mle_consistency_scatter, cond_ref, cond_comparisons))
 
-                # Nine-Square Classification
-                html.append('<h5>Nine-Square Classification</h5>')
-                html.append(_desc_html('mle_nine_square'))
-                html.append(self._multi_panel_grid(
-                    self.plot_mle_nine_square, cond_ref, cond_comparisons))
+                    html.append('<h5>Selection Scatter — ' + treats_label + ' vs ' + cond_ref + '</h5>')
+                    html.append(_desc_html('mle_selection_scatter'))
+                    html.append(self._multi_panel_grid(
+                        self.plot_mle_selection_scatter, cond_ref, cond_comparisons))
+
+                    html.append('<h5>Nine-Square Classification — ' + treats_label + ' vs ' + cond_ref + '</h5>')
+                    html.append(_desc_html('mle_nine_square'))
+                    html.append(self._multi_panel_grid(
+                        self.plot_mle_nine_square, cond_ref, cond_comparisons))
 
             elif len(self.mle_conditions) == 1:
                 html.append(_desc_html('mle_beta_density'))
