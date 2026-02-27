@@ -118,6 +118,10 @@ def write_gene_to_file(allgenedict,outfile,args,betalabels=None):
         notskip=True
     if notskip==False:
       continue
+    # skip genes where all sgRNA counts are zero in all samples (only pseudocount=1 remains)
+    if np.all(np.array(tginst.nb_count) == 1):
+      logging.info('Skipping gene '+tgid+': all sgRNA counts are zero in all samples')
+      continue
     wfield=tginst.gene_to_printfield()
     print('\t'.join(wfield),file=ofid)
   # end
