@@ -1940,7 +1940,7 @@ class MAGeCKHTMLReport:
         # --- RRA ---
         if self.rra_gene_summaries:
             html.append('<h3>2.1 Rank Aggregation (RRA) Results</h3>')
-            for label, df in sorted(self.rra_gene_summaries.items()):
+            for label, df in self.rra_gene_summaries.items():  # preserve file-order (Python 3.7+ dict)
                 html.append('<h4>' + label + '</h4>')
 
                 # FDR summary
