@@ -802,9 +802,16 @@ def magecktest_main(args):
     vrv.generatePDF(args.keep_tmp)
   # HTML report
   if hasattr(args, "html_report") and args.html_report:
-    from mageck.htmlReport import MAGeCKHTMLReport
+    from mageck.htmlReport import MAGeCKHTMLReport, _flatten_tokens
+    # In day0-label mode every sample is part of the comparison, so the
+    # sgRNA line plots correctly show all samples.
+    _cmp_tokens = None if getattr(args, 'day0_label', None) else \
+        _flatten_tokens(getattr(args, 'treatment_id', None),
+                        getattr(args, 'control_id', None))
     _report=MAGeCKHTMLReport(output_prefix=args.output_prefix,
-                             count_table=args.count_table)
+                             count_table=args.count_table,
+                             library_file=getattr(args, 'library', None),
+                             comparison_tokens=_cmp_tokens)
     _report.generate_report()
   # generate additional warning messages in terms of normalization
   if warning_in_norm:

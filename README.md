@@ -8,8 +8,9 @@ Enhanced [MAGeCK](https://sourceforge.net/p/mageck/wiki/Home/) (v0.5.9.5) with i
 - **Dynamic gene tables** — sort, filter, search, and paginate across all genes (not just top 20)
 - **GO/Hallmark pathway enrichment** — ORA via decoupler with interactive dot plots
 - **FLUTE-style nine-square plot** — 4-group gene classification for MLE treatment analysis
-- **sgRNA line plots** — click genes in tables to visualize sgRNA-level fold changes
-- **Sample description section** — dataset overview with design matrix and detected files
+- **sgRNA line plots** — click genes in tables to visualize sgRNA-level fold changes (restricted to the samples actually compared in each section)
+- **Sample description section** — dataset overview with library name + downloadable library file, design matrix and detected files
+- **Full-precision statistics** — p-values / FDRs / scores below 0.001 are kept (e.g. 1e-45), never shown or exported as 0
 - **Download section** — one-click CSV downloads for all gene summary files
 
 ## Quick Start
@@ -75,11 +76,19 @@ Required:
 
 Optional:
   --gene-summary FILE [FILE ...]   Additional gene summary files
+  --library FILE                   sgRNA library file (shown with a download link in the report)
+  --treatment LABELS               Treatment samples of the RRA comparison (comma-separated)
+  --control LABELS                 Control samples of the RRA comparison (comma-separated)
   --skip-enrichment                Skip GO/Hallmark enrichment analysis
   --enrichment-top-n N             Number of top genes for enrichment (default: 50)
   --enrichment-fdr F               FDR cutoff for enrichment (default: 0.05)
   --organism ORGANISM              Organism for pathway DB (default: human)
 ```
+
+Note: when a report is generated from a directory that contains MAGeCK log
+files, the count table (`-k`), the sgRNA library (`-l`, from the `mageck
+count` log) and the compared samples (`-t`/`-c`, from the `mageck test` log)
+are recovered automatically — the explicit options above override them.
 
 ## What's Modified
 

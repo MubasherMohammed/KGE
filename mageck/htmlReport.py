@@ -103,7 +103,8 @@ _CORE_ESSENTIAL_GENES = {
 
 # Plot descriptions (professional bioinformatics captions)
 _DESC = {
-    'lib_size': ('Total read counts per sample. Uniform library sizes across '
+    'lib_size': ('Number of reads mapped to sgRNAs per sample (sum of the '
+                 'sgRNA count table). Comparable mapped-read depths across '
                  'conditions indicate comparable sequencing depth, which is '
                  'essential for reliable differential analysis.'),
     'count_dist': ('Distribution of median-normalized read counts across all samples. '
@@ -142,21 +143,25 @@ _DESC = {
                     'genes exhibit condition-specific phenotypes. Top 10 '
                     'depleted and enriched genes are labeled.'),
     'enrich_depl': ('MSigDB Hallmark pathway enrichment (ORA) of the top '
-                    'depleted genes. Dot size reflects statistical '
-                    'significance (\u2212log\u2081\u2080 adj. p-value); '
-                    'color encodes ORA enrichment score. '
-                    'These pathways are under negative selection.'),
+                'depleted genes (top-ranked among significant genes, FDR &lt; 0.05; '
+                'see gene-selection note above). Dot size reflects statistical '
+                'significance (\u2212log\u2081\u2080 adj. p-value); '
+                'color encodes ORA enrichment score. '
+                'These pathways are under negative selection.'),
     'enrich_enr': ('MSigDB Hallmark pathway enrichment (ORA) of the top '
-                   'enriched genes. Dot size reflects statistical '
+                   'enriched genes (top-ranked among significant genes, FDR &lt; 0.05; '
+                   'see gene-selection note above). Dot size reflects statistical '
                    'significance (\u2212log\u2081\u2080 adj. p-value); '
                    'color encodes ORA enrichment score. '
                    'These pathways are under positive selection.'),
     'enrich_sens': ('MSigDB Hallmark pathway enrichment (ORA) of top '
-                    'depleted genes (negative beta). Dot size = '
+                    'depleted genes (negative beta, top-ranked among significant '
+                    'genes, FDR &lt; 0.05; see gene-selection note above). Dot size = '
                     '\u2212log\u2081\u2080(adj. p-value); color = ORA score. '
                     'These pathways are under negative selection.'),
     'enrich_res': ('MSigDB Hallmark pathway enrichment (ORA) of top '
-                   'enriched genes (positive beta). Dot size = '
+                   'enriched genes (positive beta, top-ranked among significant '
+                   'genes, FDR &lt; 0.05; see gene-selection note above). Dot size = '
                    '\u2212log\u2081\u2080(adj. p-value); color = ORA score. '
                    'These pathways are under positive selection.'),
     'sgrna_line': ('sgRNA-level log\u2082 fold-change relative to the '
@@ -167,7 +172,10 @@ _DESC = {
     'gene_table': ('Full gene-level summary table. Sort by any column '
                    '(click header), filter by FDR threshold, or search '
                    'by gene name. Click a row to display its sgRNA counts '
-                   'in the line plot below.'),
+                   'in the line plot below. Column names and values are '
+                   'shown exactly as written in the MAGeCK output files '
+                   '(no renaming, rounding or reformatting); the CSV '
+                   'exports contain the same raw values.'),
     'mapping_stats': ('Mapping statistics from MAGeCK count. Total reads, '
                       'mapped reads, and mapping rate per sample. Samples '
                       'with low mapping rates may indicate library mismatch '
@@ -307,6 +315,24 @@ def _trunc(name, maxlen=42):
     return name[:maxlen - 1] + '\u2026'
 
 
+def _flatten_tokens(*specs):
+    """Flatten CLI token specs (a string or list of comma-separated strings).
+
+    Returns a list of tokens, or None if nothing was given.
+    """
+    toks = []
+    for s in specs:
+        if not s:
+            continue
+        parts = [s] if isinstance(s, str) else [str(x) for x in s]
+        for p in parts:
+            for t in p.split(','):
+                t = t.strip()
+                if t:
+                    toks.append(t)
+    return toks or None
+
+
 # ---------------------------------------------------------------------------
 # Main report class
 # ---------------------------------------------------------------------------
@@ -319,7 +345,8 @@ class MAGeCKHTMLReport:
                  design_matrix=None, fdr_threshold=0.05, top_n=20,
                  norm_method='median', skip_qc=False, skip_results=False,
                  enrichment_top_n=50, organism='human',
-                 skip_enrichment=False, enrichment_fdr=0.05):
+                 skip_enrichment=False, enrichment_fdr=0.05,
+                 library_file=None, comparison_tokens=None):
         self.output_prefix = output_prefix
         self.count_table_path = count_table
         self.title = title or 'CRISPR Screen Report'
@@ -335,6 +362,8 @@ class MAGeCKHTMLReport:
         self.organism = organism
         self.skip_enrichment = skip_enrichment
         self.enrichment_fdr = enrichment_fdr
+        self.library_file = library_file
+        self.comparison_tokens = comparison_tokens
 
         # Data containers
         self.count_df = None
@@ -349,15 +378,27 @@ class MAGeCKHTMLReport:
         self.countsummary_df = None
         self._hallmark_net = None
 
+        # Comparison samples (resolved from comparison_tokens / test log)
+        self.comparison_samples = None
+        # Per comparison label -> resolved sample list (from 'mageck test' logs)
+        self._label_comparison_samples = {}
+        # Per line-plot (comparison section) sample subsets for sgRNA plots
+        self._lp_samples = {}
+
         # Enrichment results for download
         self._enrichment_counter = 0
         self._enrichment_store = {}  # key -> {source, score, padj} list
+        self._enrichment_input = {}  # key -> {'title', 'genes': [meta...]}
 
         # Default gene selections for line plots
         self._default_genes = {}  # lp_id -> [gene_names]
 
         # Downloadable files (detected in detect_outputs)
         self._log_files = []  # list of (label, path) tuples
+        # Source file paths for summary tables (raw-value display + downloads)
+        self.rra_gene_summary_paths = {}
+        self.rra_sgrna_summary_paths = {}
+        self.mle_gene_summary_path = None
 
         # HTML assembly
         self.sections = []
@@ -396,12 +437,14 @@ class MAGeCKHTMLReport:
                 continue
             if self._is_mle_gene_summary(gsf):
                 self.mle_gene_summary = pd.read_csv(gsf, sep='\t')
+                self.mle_gene_summary_path = gsf
                 self.mle_conditions = self._extract_mle_conditions(self.mle_gene_summary)
                 logging.info('Detected MLE gene summary: %s (conditions: %s)',
                              gsf, ', '.join(self.mle_conditions))
             else:
                 label = self._extract_comparison_label(gsf)
                 self.rra_gene_summaries[label] = pd.read_csv(gsf, sep='\t')
+                self.rra_gene_summary_paths[label] = gsf
                 logging.info('Detected RRA gene summary: %s (%s)', gsf, label)
 
         if self.sgrna_summary_files:
@@ -416,6 +459,7 @@ class MAGeCKHTMLReport:
             if 'control_count' in header:
                 label = self._extract_comparison_label(sgf)
                 self.rra_sgrna_summaries[label] = pd.read_csv(sgf, sep='\t')
+                self.rra_sgrna_summary_paths[label] = sgf
             elif self.mle_sgrna_summary is None:
                 self.mle_sgrna_summary = pd.read_csv(sgf, sep='\t')
 
@@ -441,6 +485,22 @@ class MAGeCKHTMLReport:
             if rp not in seen_logs:
                 seen_logs.add(rp)
                 self._log_files.append((os.path.basename(lf), lf))
+        # Also discover per-comparison test logs that live next to each RRA
+        # gene summary (e.g. <run>/test/<name>/<name>.log). This keeps the
+        # per-comparison sample recovery working even when the report's
+        # base_dir is a different folder (e.g. <run>/reports).
+        _gs_paths = list(self.rra_gene_summary_paths.values())
+        if self.mle_gene_summary_path:
+            _gs_paths.append(self.mle_gene_summary_path)
+        for _gsf in _gs_paths:
+            _gdir = os.path.dirname(_gsf)
+            if not _gdir or not os.path.isdir(_gdir):
+                continue
+            for _lf in sorted(glob.glob(os.path.join(_gdir, '*.log'))):
+                _rp = os.path.realpath(_lf)
+                if _rp not in seen_logs:
+                    seen_logs.add(_rp)
+                    self._log_files.append((os.path.basename(_lf), _lf))
         if self._log_files:
             logging.info('Detected %d log file(s)', len(self._log_files))
 
@@ -467,11 +527,92 @@ class MAGeCKHTMLReport:
                 if self.design_matrix_df is not None:
                     break
 
+        # Count table: recover from a 'mageck test' log line if not loaded
+        if self.count_df is None:
+            for _lbl, _lpath in self._log_files:
+                try:
+                    with open(_lpath) as _lf:
+                        first_line = _lf.readline()
+                    if ' test ' in first_line and (' -k ' in first_line or '--count-table' in first_line):
+                        import shlex
+                        parts = shlex.split(first_line)
+                        for pi, p in enumerate(parts):
+                            if p in ('-k', '--count-table') and pi + 1 < len(parts):
+                                ct_cand = parts[pi + 1]
+                                if os.path.isfile(ct_cand):
+                                    self._load_count_table(ct_cand)
+                                    logging.info('Recovered count table from test log: %s', ct_cand)
+                                break
+                except Exception:
+                    pass
+                if self.count_df is not None:
+                    break
+
+        # Library file: explicit value first, otherwise recovered from a
+        # 'mageck count' log line (first line = full command).
+        if not self.library_file:
+            for _lbl, _lpath in self._log_files:
+                try:
+                    with open(_lpath) as _lf:
+                        first_line = _lf.readline()
+                    if ' count ' in first_line and (' -l ' in first_line or '--list-seq' in first_line):
+                        import shlex
+                        parts = shlex.split(first_line)
+                        for pi, p in enumerate(parts):
+                            if p in ('-l', '--list-seq') and pi + 1 < len(parts):
+                                lib_cand = parts[pi + 1]
+                                if os.path.isfile(lib_cand):
+                                    self.library_file = lib_cand
+                                    logging.info('Detected library file from count log: %s', lib_cand)
+                                break
+                except Exception:
+                    pass
+                if self.library_file:
+                    break
+
+        # Comparison samples: explicit tokens first, otherwise recovered per
+        # comparison from 'mageck test' log lines (-t/-c + -n prefix). Each
+        # comparison gets its own sample subset (used by the sgRNA line
+        # plots); for a single-comparison report (report prefix == comparison
+        # name) the tokens also become the global fallback.
+        if self.comparison_tokens is None:
+            self_prefix_base = os.path.basename(self.output_prefix)
+            for _lbl, _lpath in self._log_files:
+                try:
+                    with open(_lpath) as _lf:
+                        first_line = _lf.readline()
+                    if ' test ' not in first_line:
+                        continue
+                    import shlex
+                    parts = shlex.split(first_line)
+                    toks, n_prefix = [], None
+                    for pi, p in enumerate(parts):
+                        if p in ('-t', '--treatment-id', '-c', '--control-id') and pi + 1 < len(parts):
+                            toks.extend(parts[pi + 1].split(','))
+                        elif p in ('-n', '--output-prefix') and pi + 1 < len(parts):
+                            n_prefix = parts[pi + 1]
+                    if not toks:
+                        continue
+                    label = os.path.basename(n_prefix) if n_prefix else _lbl[:-4]
+                    resolved = self._resolve_comparison_samples(toks)
+                    if resolved:
+                        self._label_comparison_samples[label] = resolved
+                        logging.info('Recovered comparison samples for %s: %s',
+                                     label, ', '.join(resolved))
+                        if label == self_prefix_base:
+                            self.comparison_tokens = toks
+                except Exception:
+                    pass
+
+        # Resolve comparison tokens to count-table sample names
+        if self.comparison_tokens and self.sample_names:
+            self.comparison_samples = self._resolve_comparison_samples(self.comparison_tokens)
+
     def _load_count_table(self, path):
         sep = ',' if path.endswith('.csv') else '\t'
         self.count_df = pd.read_csv(path, sep=sep)
         cols = list(self.count_df.columns)
-        if cols[0].lower() in ('sgrna', 'shrna', 'guide'):
+        if cols[0].lower() in ('sgrna', 'shrna', 'guide', 'mageck_id', 'id'):
             cols[0] = 'sgRNA'
         if len(cols) > 1 and cols[1].lower() == 'gene':
             cols[1] = 'Gene'
@@ -528,6 +669,64 @@ class MAGeCKHTMLReport:
     def _extract_comparison_label(filepath):
         base = os.path.basename(filepath)
         return base.replace('.gene_summary.txt', '').replace('.sgrna_summary.txt', '')
+
+    def _resolve_comparison_samples(self, tokens):
+        """Resolve -t/-c tokens (sample labels or 0-based indices) to the
+        corresponding count-table sample names. Returns None if nothing
+        could be resolved."""
+        if not tokens or not self.sample_names:
+            return None
+        n = len(self.sample_names)
+        resolved = []
+        for tok in tokens:
+            tok = str(tok).strip()
+            if not tok:
+                continue
+            if tok not in self.sample_names:
+                if tok.isdigit() and 0 <= int(tok) < n:
+                    tok = self.sample_names[int(tok)]
+                else:
+                    continue
+            if tok not in resolved:
+                resolved.append(tok)
+        return resolved or None
+
+    def _condition_samples(self, cond):
+        """Sample names belonging to an MLE condition (from the design
+        matrix; first column = sample names). Returns None if unknown."""
+        if self.design_matrix_df is None or not self.sample_names:
+            return None
+        dm = self.design_matrix_df
+        if cond not in dm.columns:
+            return None
+        sample_col = list(dm.columns)[0]
+        names = [str(x) for x in dm[dm[cond] == 1][sample_col].tolist()
+                 if str(x) in self.sample_names]
+        return names or None
+
+    def _lineplot_samples_rra(self, label=None):
+        """Samples shown in an RRA sgRNA line plot: the compared samples of
+        that comparison (per-label, from -t/-c or the matching test log),
+        else the global comparison samples, else all samples."""
+        sub = None
+        if label and label in self._label_comparison_samples:
+            sub = self._label_comparison_samples[label]
+        elif self.comparison_samples:
+            sub = self.comparison_samples
+        if sub:
+            sset = set(self.sample_names)
+            sub = [s for s in sub if s in sset]
+            if sub:
+                return sub
+        return list(self.sample_names)
+
+    def _lineplot_samples_mle(self, cond):
+        """Samples shown in an MLE condition's sgRNA line plot: the samples
+        of that condition from the design matrix, otherwise all."""
+        sub = self._condition_samples(cond)
+        if sub:
+            return sub
+        return list(self.sample_names)
 
     @staticmethod
     def _group_name(sample_names):
@@ -814,9 +1013,9 @@ class MAGeCKHTMLReport:
                    'textposition': 'outside', 'cliponaxis': False,
                    'textfont': {'size': 10},
                    'marker': {'color': colors}}]
-        layout = {'title': {'text': 'Library Size (Total Reads)', 'font': {'size': 13}},
+        layout = {'title': {'text': 'Mapped Reads per Sample', 'font': {'size': 13}},
                   'xaxis': {'automargin': True, 'tickfont': {'size': 10}},
-                  'yaxis': {'title': 'Total Read Counts', 'automargin': True,
+                  'yaxis': {'title': 'Mapped Reads', 'automargin': True,
                             'tickfont': {'size': 10}},
                   'height': 340, 'margin': {'t': 45, 'b': 40, 'l': 65, 'r': 15}}
         return self._plotly_div(traces, layout)
@@ -1093,9 +1292,9 @@ class MAGeCKHTMLReport:
         html = []
         html.append('<div class="vol-ctrl">')
         html.append('  FDR \u2264 <input type="number" value="0.05" step="0.01" min="0" max="1" '
-                     'id="vfdr-' + div_id + '" oninput="drawVolcano(\'' + div_id + '\')">')
+             'id="vfdr-' + div_id + '" oninput="vTouched(\'' + div_id + '\');drawVolcano(\'' + div_id + '\')">')
         html.append('  |' + eff_label + '| \u2265 <input type="number" value="0" step="0.1" min="0" '
-                     'id="veff-' + div_id + '" oninput="drawVolcano(\'' + div_id + '\')">')
+                     'id="veff-' + div_id + '" oninput="vTouched(\'' + div_id + '\');drawVolcano(\'' + div_id + '\')">')
         html.append('</div>')
         html.append('<div id="' + div_id + '" class="plotly-chart"></div>')
         vdata['title'] = title
@@ -1126,8 +1325,8 @@ class MAGeCKHTMLReport:
         vdata = {'g': genes.tolist(),
                  'lfc': np.round(lfc, 4).tolist(),
                  'y': np.round(y, 4).tolist(),
-                 'nf': np.round(neg_fdr, 6).tolist(),
-                 'pf': np.round(pos_fdr, 6).tolist(),
+                 'nf': neg_fdr.tolist(),
+                 'pf': pos_fdr.tolist(),
                  'top_enr': top_enr, 'top_dep': top_dep}
         return self._volcano_html(div_id, vdata, label + ': Volcano',
                                   'Log2 Fold Change', '-log10(FDR)', 'LFC',
@@ -1156,8 +1355,8 @@ class MAGeCKHTMLReport:
         vdata = {'g': genes.tolist(),
                  'lfc': np.round(beta, 4).tolist(),
                  'y': np.round(y, 4).tolist(),
-                 'nf': np.round(fdr, 6).tolist(),
-                 'pf': np.round(fdr, 6).tolist(),
+                 'nf': fdr.tolist(),
+                 'pf': fdr.tolist(),
                  'top_enr': top_enr, 'top_dep': top_dep}
         ref = self._get_comparison_ref(condition)
         title = (condition + ' vs ' + ref if ref else condition) + ' (Beta)'
@@ -1436,6 +1635,12 @@ class MAGeCKHTMLReport:
         net = self._fetch_hallmark_net()
         if net is None or len(gene_list) == 0:
             return None
+        # decoupler's ORA prunes the matrix to the (non-zero) input genes and
+        # selects the top ~95% of them; with very small inputs its numba
+        # kernel fails ("cannot compute fingerprint of empty set") or the
+        # result is degenerate. Use an exact hypergeometric fallback instead.
+        if len(set(gene_list)) <= 4:
+            return self._run_ora_manual(gene_list, all_genes)
         sig_set = set(gene_list)
         values = [1.0 if g in sig_set else 0.0 for g in all_genes]
         mat = pd.DataFrame([values], columns=list(all_genes), index=['sample'])
@@ -1471,13 +1676,80 @@ class MAGeCKHTMLReport:
             res = res.dropna(subset=['padj']).sort_values('padj').reset_index(drop=True)
             return res
         except Exception as e:
-            logging.warning('ORA enrichment failed: %s', e)
-            return None
+            logging.warning('ORA enrichment failed: %s (using hypergeometric fallback)', e)
+            return self._run_ora_manual(gene_list, all_genes)
 
-    def plot_enrichment_dotplot(self, ora_df, title, direction='depleted', div_id=None):
+    def _run_ora_manual(self, gene_list, all_genes):
+        """Exact hypergeometric ORA fallback (BH-corrected) with the same
+        output schema as _run_ora. Used for very small gene lists, where
+        decoupler's numba kernel fails, and as a last resort when decoupler
+        errors out. Universe = genes present in the hallmark network."""
+        net = self._hallmark_net
+        if net is None:
+            return None
+        from scipy import stats
+        sig_set = set(gene_list)
+        net_targets = set(net['target'].unique())
+        bg = [g for g in all_genes if g in net_targets]
+        n = len(bg)
+        k = len(sig_set & net_targets)
+        if n == 0 or k == 0:
+            return None
+        bgset = set(bg)
+        pathway_genes = net.groupby('source')['target'].apply(set).to_dict()
+        rows = []
+        for pw, pw_genes in pathway_genes.items():
+            pw_bg = pw_genes & bgset
+            K = len(pw_bg)
+            x = len(pw_bg & sig_set)
+            if K == 0 or x == 0:
+                continue
+            p = float(stats.hypergeom.sf(x - 1, n, K, k))
+            # Haldane-corrected log-odds on the full background (same
+            # semantics as decoupler's ORA score)
+            a, b = x, K - x
+            c, d = k - x, n - K - (k - x)
+            odds = ((a + 0.5) * (d + 0.5)) / ((b + 0.5) * (c + 0.5))
+            rows.append((pw, float(np.log2(odds)), p, x, len(pw_genes),
+                         pw_genes & sig_set))
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r[2])
+        m = len(rows)
+        ps = np.array([r[2] for r in rows])
+        raw = ps * m / np.arange(1, m + 1)
+        padj = np.clip(np.minimum.accumulate(raw[::-1])[::-1], 0.0, 1.0)
+        res = pd.DataFrame({
+            'source': [r[0] for r in rows],
+            'score': [r[1] for r in rows],
+            'padj': padj,
+            'overlap_count': [r[3] for r in rows],
+            'pathway_size': [r[4] for r in rows],
+        })
+        res['overlap_genes'] = [', '.join(sorted(r[5])) for r in rows]
+        return res.dropna(subset=['padj']).sort_values('padj').reset_index(drop=True)
+
+    @staticmethod
+    def _ora_input_meta(sel_df, gene_col, extra_cols):
+        """Per-gene metadata for the genes fed to ORA (downloadable audit
+        trail). extra_cols: list of (csv_name, df_column) pairs."""
+        meta = []
+        for _, r in sel_df.iterrows():
+            entry = {'Gene': str(r[gene_col])}
+            for name, col in extra_cols:
+                if col in sel_df.columns:
+                    v = r[col]
+                    entry[name] = int(v) if isinstance(v, (int, np.integer)) else float(v)
+            meta.append(entry)
+        return meta
+
+    def plot_enrichment_dotplot(self, ora_df, title, direction='depleted', div_id=None,
+                            input_genes=None):
         """Enrichment dot plot with direction-specific coloring and download.
 
         direction: 'depleted' or 'enriched'
+        input_genes: optional list of {Gene, Rank, FDR, LFC/Beta, ...} meta dicts
+                     for the genes fed to ORA (downloadable, for auditability).
         Returns (html_string, div_id) tuple.
         """
         if ora_df is None or len(ora_df) == 0:
@@ -1631,10 +1903,17 @@ class MAGeCKHTMLReport:
                 entry['Genes'] = str(row.get('overlap_genes', ''))
             store_rows.append(entry)
         self._enrichment_store[ekey] = store_rows
+        if input_genes:
+            self._enrichment_input[ekey] = {'title': title, 'genes': input_genes}
         safe_fn = title.replace(' ', '_').replace(':', '').replace('|', '_')
+        btns = ('<button class="download-btn-sm" onclick="dlEnr(\'' + ekey + '\',\'' + safe_fn + '.csv\')">'
+                'Download enrichment data</button>')
+        if input_genes:
+            btns += ('<button class="download-btn-sm" onclick="dlEnrGenes(\'' + ekey + '\',\''
+                     + safe_fn + '_input_genes.csv\')" style="margin-left:6px;">'
+                     'Download ORA input genes (n=' + str(len(input_genes)) + ')</button>')
         dl_btn = ('<div style="text-align:right;margin-top:-5px;margin-bottom:10px;">'
-                  '<button class="download-btn-sm" onclick="dlEnr(\'' + ekey + '\',\'' + safe_fn + '.csv\')">'
-                  'Download enrichment data</button></div>\n')
+                  + btns + '</div>\n')
 
         return (plot_html + dl_btn, div_id)
 
@@ -1642,12 +1921,43 @@ class MAGeCKHTMLReport:
     # Dynamic tables
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _read_raw_tokens(raw_file, col_keys, n_rows):
+        """Read the raw text tokens of a MAGeCK summary file so the table can
+        display and export the values EXACTLY as written in the file (no
+        float round-trip, no reformatting). Returns a list of token lists
+        aligned to col_keys, or None if the file is unusable."""
+        if not raw_file or not os.path.isfile(raw_file):
+            return None
+        try:
+            with open(raw_file, 'r', encoding='utf-8') as f:
+                lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+            if not lines:
+                return None
+            header = [h.strip() for h in lines[0].split('\t')]
+            if header != [str(k).strip() for k in col_keys]:
+                return None
+            vals = []
+            for ln in lines[1:]:
+                parts = ln.split('\t')
+                if len(parts) != len(col_keys):
+                    return None
+                vals.append(parts)
+            if len(vals) != n_rows:
+                return None
+            return vals
+        except Exception:
+            return None
+
     def _generate_dynamic_table(self, df, table_id, gene_col='id',
                                 fdr_cols=None, lineplot_id='',
-                                eff_col=None):
+                                eff_col=None, raw_file=None):
         """Generate a dynamic filterable/sortable table with all genes.
 
         eff_col: column key used for effect-size filtering (|LFC| or |beta|).
+        raw_file: path to the source summary file; when readable, its raw
+                  text tokens are embedded so the table shows (and exports)
+                  exactly the values MAGeCK wrote.
         """
         self._table_ids.append(table_id)
         columns = []
@@ -1668,16 +1978,9 @@ class MAGeCKHTMLReport:
                 fmt = '.4f'
                 if auto_eff is None and ('lfc' in col or 'beta' in col):
                     auto_eff = col
+            # Keep the ORIGINAL MAGeCK column names so the table matches the
+            # output files exactly (no renamed headers).
             label = col
-            label = label.replace('neg|', 'Neg ').replace('pos|', 'Pos ')
-            for old, new in [('|beta', ' Beta'), ('|z', ' Z'), ('|p-value', ' P'),
-                             ('|fdr', ' FDR'), ('|wald-p-value', ' Wald-P'),
-                             ('|wald-fdr', ' Wald-FDR')]:
-                label = label.replace(old, new)
-            if col == 'id':
-                label = 'Gene'
-            elif col == 'num':
-                label = '#sgRNAs'
             columns.append({'key': col, 'label': label, 'fmt': fmt, 'isFdr': is_fdr})
 
         if fdr_cols is None:
@@ -1686,15 +1989,22 @@ class MAGeCKHTMLReport:
             eff_col = auto_eff or ''
 
         # Compact column-oriented format: {keys:[], vals:[[row1],[row2],...]}
-        # Much smaller than records format since column names aren't repeated
-        df_slim = df.copy()
-        for col in df_slim.columns:
-            if df_slim[col].dtype in ('float64', 'float32'):
-                df_slim[col] = df_slim[col].round(3)
+        # Much smaller than records format since column names aren't repeated.
+        # Values are embedded UNMODIFIED (no rounding, no reformatting) so the
+        # table shows exactly the values produced by the MAGeCK run —
+        # including p-values / FDRs / scores below 0.001 (which were
+        # previously rounded to 0). When the source file is available, the
+        # RAW TEXT tokens from the file are embedded, so both the on-screen
+        # table and the CSV exports are byte-exact matches of the MAGeCK
+        # output file.
         col_keys = [c['key'] for c in columns]
-        col_vals = []
-        for _, row in df_slim.iterrows():
-            col_vals.append([_json_safe(row[k]) for k in col_keys])
+        raw_vals = self._read_raw_tokens(raw_file, col_keys, len(df))
+        if raw_vals is not None:
+            col_vals = raw_vals
+        else:
+            col_vals = []
+            for _, row in df.iterrows():
+                col_vals.append([_json_safe(row[k]) for k in col_keys])
         data_json = json.dumps({'k': col_keys, 'v': col_vals}, separators=(',', ':'), default=str)
         cols_json = json.dumps(columns, separators=(',', ':'))
         fdr_keys_json = json.dumps(fdr_cols, separators=(',', ':'))
@@ -1816,6 +2126,26 @@ class MAGeCKHTMLReport:
     # Section builders
     # ------------------------------------------------------------------
 
+    def _library_row(self):
+        """'Library' row for the sample description: the library name and a
+        clickable link to the library file (embedded, so the report stays
+        self-contained)."""
+        if not self.library_file:
+            return ('<tr><td>Library:</td><td>Not specified '
+                    '<span class="metadata">(re-run the report with '
+                    '--library FILE to include it)</span></td></tr>')
+        name = os.path.basename(self.library_file)
+        cell = '<strong>' + name + '</strong>'
+        try:
+            with open(self.library_file, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('ascii')
+            cell += (' <a class="download-btn-sm" href="data:text/plain;base64,'
+                     + b64 + '" download="' + name + '">Download ' + name + '</a>')
+        except Exception as e:
+            logging.warning('Could not embed library file for download: %s', e)
+            cell += ' <span class="metadata">(file not readable: ' + self.library_file + ')</span>'
+        return '<tr><td>Library:</td><td>' + cell + '</td></tr>'
+
     def _build_sample_section(self):
         html = []
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1823,13 +2153,21 @@ class MAGeCKHTMLReport:
         # Report metadata banner
         html.append('<div class="report-meta">')
         html.append('<table class="info-table">')
+        html.append(self._library_row())
         html.append('<tr><td>Report Generated:</td><td>' + now_str + '</td></tr>')
         html.append('<tr><td>MAGeCK Version:</td><td>' + __version__ + '</td></tr>')
         html.append('<tr><td>Analysis Prefix:</td><td>' + os.path.basename(self.output_prefix) + '</td></tr>')
         html.append('<tr><td>Normalization:</td><td>' + self.norm_method.capitalize() + '-ratio</td></tr>')
-        html.append('<tr><td>FDR Threshold:</td><td>' + str(self.fdr_threshold) + '</td></tr>')
+        html.append('<tr><td>Default FDR Threshold:</td><td>' + str(self.fdr_threshold)
+                    + ' <span class="metadata">(initial significance cutoff — '
+                    'adjustable at any time via the interactive controls in '
+                    'the gene tables and volcano plots)</span></td></tr>')
         if not self.skip_enrichment:
-            html.append('<tr><td>Enrichment:</td><td>MSigDB Hallmark (' + self.organism + '), top ' + str(self.enrichment_top_n) + ' genes, ORA adj. p &lt; ' + str(self.enrichment_fdr) + '</td></tr>')
+            html.append('<tr><td>Pathway Enrichment (ORA):</td><td>MSigDB Hallmark (' + self.organism + ') Over-Representation Analysis (ORA) of the top ' + str(self.enrichment_top_n) + ' genes by rank among significant genes (FDR &lt; ' + str(self.enrichment_fdr) + ') per direction, per comparison; ORA against all genes; pathways shown at adj. p &lt; ' + str(self.enrichment_fdr)
+                        + '. <span class="metadata">ORA = Over-Representation Analysis. '
+                        'The number of top genes and the FDR cutoff are report '
+                        'parameters (adjustable: --enrichment-top-n, '
+                        '--enrichment-fdr).</span></td></tr>')
         html.append('</table></div>')
 
         if self.count_df is not None:
@@ -1881,8 +2219,8 @@ class MAGeCKHTMLReport:
                 html.append('<div>' + tbl_html + '</div>')
                 html.append('</div>')
 
-        # Row 1: Library size + Zero-count (side by side)
-        html.append('<h3>1.1 Library Size &amp; Zero-Count sgRNAs</h3>')
+        # Row 1: Mapped reads per sample + Zero-count (side by side)
+        html.append('<h3>1.1 Mapped Reads per Sample &amp; Zero-Count sgRNAs</h3>')
         html.append('<div class="plot-grid">')
         html.append('<div>')
         html.append(_desc_html('lib_size'))
@@ -1957,9 +2295,12 @@ class MAGeCKHTMLReport:
                 # Full gene table
                 tid = 'rra-' + label.replace(' ', '_')
                 lp_id = 'lineplot-rra-' + label.replace(' ', '_') if has_counts else ''
+                if lp_id:
+                    self._lp_samples[lp_id] = self._lineplot_samples_rra(label)
                 html.append('<h5>Gene Summary Table</h5>')
                 html.append(_desc_html('gene_table'))
-                html.append(self._generate_dynamic_table(df, tid, gene_col='id', lineplot_id=lp_id))
+                html.append(self._generate_dynamic_table(df, tid, gene_col='id', lineplot_id=lp_id,
+                                         raw_file=self.rra_gene_summary_paths.get(label)))
 
                 # Pre-create enrichment div IDs for volcano linkage
                 enr_dep_div = self._next_id('enr')
@@ -1994,23 +2335,57 @@ class MAGeCKHTMLReport:
                     gene_col = 'id' if 'id' in df.columns else df.columns[0]
                     all_genes = df[gene_col].tolist()
                     html.append('<h5>Hallmark Pathway Enrichment</h5>')
+                    # Gene selection per direction: top N by RRA rank AMONG
+                    # significant genes (FDR < enrichment_fdr).
+                    sel_info = {}
+                    for _d in ['neg', 'pos']:
+                        _fdr_c = _d + '|fdr'
+                        _rank_c = _d + '|rank'
+                        if _fdr_c not in df.columns:
+                            sel_info[_d] = ([], 0, None)
+                            continue
+                        _sig = df[df[_fdr_c].astype(float) < self.enrichment_fdr]
+                        if len(_sig) == 0:
+                            sel_info[_d] = ([], 0, None)
+                        elif _rank_c in df.columns:
+                            _sel = _sig.sort_values(_rank_c).head(self.enrichment_top_n)
+                            sel_info[_d] = (_sel[gene_col].tolist(), len(_sig), _sel)
+                        else:
+                            _sel = _sig.sort_values(_fdr_c).head(self.enrichment_top_n)
+                            sel_info[_d] = (_sel[gene_col].tolist(), len(_sig), _sel)
+                    _dep_sel, _dep_ns, _ = sel_info['neg']
+                    _enr_sel, _enr_ns, _ = sel_info['pos']
+                    html.append('<div class="plot-desc" style="margin-bottom:8px;"><strong>Gene selection:</strong> top '
+                                + str(self.enrichment_top_n) + ' genes by RRA rank among significant genes (FDR &lt; '
+                                + str(self.enrichment_fdr) + ') per direction &mdash; depleted: '
+                                + str(len(_dep_sel)) + ' of ' + str(_dep_ns) + ' significant genes used; enriched: '
+                                + str(len(_enr_sel)) + ' of ' + str(_enr_ns) + ' significant genes used. ORA is computed '
+                                'against all ' + format(len(all_genes), ',') + ' genes (decoupler); pathways are shown at '
+                                'adj. p &lt; ' + str(self.enrichment_fdr) + '. Note: adjusting the volcano FDR/LFC '
+                                'cutoffs recomputes ORA in the browser (approximate) over the volcano-selected genes; '
+                                'the plot title then shows the active gene count and cutoffs.</div>')
                     html.append('<div class="plot-grid">')
                     for direction, dtitle, edir, ediv in [
                         ('neg', 'Depleted Genes', 'depleted', enr_dep_div),
                         ('pos', 'Enriched Genes', 'enriched', enr_enr_div)]:
-                        rank_col = direction + '|rank'
-                        if rank_col in df.columns:
-                            top_genes = df.sort_values(rank_col).head(self.enrichment_top_n)[gene_col].tolist()
-                        else:
-                            fdr_c = direction + '|fdr'
-                            top_genes = df.sort_values(fdr_c).head(self.enrichment_top_n)[gene_col].tolist()
-                        ora_result = self._run_ora(top_genes, all_genes)
-                        full_title = label + ': ' + dtitle
+                        top_genes, _n_sig_dir, _sel_df = sel_info[direction]
                         html.append('<div>')
                         html.append(_desc_html('enrich_depl' if direction == 'neg' else 'enrich_enr'))
-                        enr_html, _ = self.plot_enrichment_dotplot(ora_result, full_title,
-                                                                    direction=edir, div_id=ediv)
-                        html.append(enr_html)
+                        if not top_genes:
+                            html.append('<p class="plot-desc" style="color:#999;">No significant genes (FDR &lt; '
+                                        + str(self.enrichment_fdr) + ') in this direction &mdash; ORA not run.</p>')
+                        else:
+                            ora_result = self._run_ora(top_genes, all_genes)
+                            full_title = label + ': ' + dtitle + ' (n = ' + str(len(top_genes)) + ')'
+                            input_genes = self._ora_input_meta(
+                                _sel_df, gene_col,
+                                [('Rank', direction + '|rank'),
+                                 ('FDR', direction + '|fdr'),
+                                 ('LFC', direction + '|lfc')])
+                            enr_html, _ = self.plot_enrichment_dotplot(ora_result, full_title,
+                                                                        direction=edir, div_id=ediv,
+                                                                        input_genes=input_genes)
+                            html.append(enr_html)
                         html.append('</div>')
                     html.append('</div>')
 
@@ -2037,7 +2412,9 @@ class MAGeCKHTMLReport:
             mle_lp_ids = []
             if has_counts:
                 for cond in self.mle_conditions:
-                    mle_lp_ids.append('lineplot-mle-' + cond.replace(' ', '_'))
+                    _lp = 'lineplot-mle-' + cond.replace(' ', '_')
+                    mle_lp_ids.append(_lp)
+                    self._lp_samples[_lp] = self._lineplot_samples_mle(cond)
                 default_genes = self._get_default_genes_mle()
                 for _lp in mle_lp_ids:
                     self._default_genes[_lp] = default_genes
@@ -2045,7 +2422,8 @@ class MAGeCKHTMLReport:
 
             html.append('<h5>MLE Gene Summary Table</h5>')
             html.append(_desc_html('gene_table'))
-            html.append(self._generate_dynamic_table(df, tid, gene_col='Gene', lineplot_id=combined_lp))
+            html.append(self._generate_dynamic_table(df, tid, gene_col='Gene', lineplot_id=combined_lp,
+                                         raw_file=self.mle_gene_summary_path))
 
             # Per-condition: FDR summary + volcano + line plot + enrichment
             for ci_idx, cond in enumerate(self.mle_conditions):
@@ -2093,26 +2471,47 @@ class MAGeCKHTMLReport:
                     beta_col = cond + '|beta'
                     if beta_col in df.columns and fdr_col in df.columns:
                         html.append('<h5>Pathway Enrichment: ' + cond_label + '</h5>')
+                        html.append('<div class="plot-desc" style="margin-bottom:8px;"><strong>Gene selection:</strong> top '
+                                    + str(self.enrichment_top_n) + ' genes by FDR among significant genes (FDR &lt; '
+                                    + str(self.enrichment_fdr) + ') within negative/positive beta, per direction. ORA is '
+                                    'computed against all ' + format(len(all_genes), ',') + ' genes (decoupler); pathways '
+                                    'are shown at adj. p &lt; ' + str(self.enrichment_fdr) + '.</div>')
                         html.append('<div class="plot-grid">')
                         # Depleted (negative beta)
-                        neg_df = df[df[beta_col] < 0].sort_values(fdr_col).head(self.enrichment_top_n)
-                        ora_neg = self._run_ora(neg_df['Gene'].tolist(), all_genes)
+                        neg_sig = df[(df[beta_col] < 0) & (df[fdr_col].astype(float) < self.enrichment_fdr)]
+                        neg_df = neg_sig.sort_values(fdr_col).head(self.enrichment_top_n)
                         html.append('<div>')
                         html.append(_desc_html('enrich_sens'))
-                        enr_html, _ = self.plot_enrichment_dotplot(
-                            ora_neg, cond_label + ': Depleted Genes',
-                            direction='depleted', div_id=enr_dep_div)
-                        html.append(enr_html)
+                        if len(neg_df) == 0:
+                            html.append('<p class="plot-desc" style="color:#999;">No significant genes (FDR &lt; '
+                                        + str(self.enrichment_fdr) + ') with negative beta &mdash; ORA not run.</p>')
+                        else:
+                            ora_neg = self._run_ora(neg_df['Gene'].tolist(), all_genes)
+                            input_genes_neg = self._ora_input_meta(
+                                neg_df, 'Gene', [('FDR', fdr_col), ('Beta', beta_col)])
+                            enr_html, _ = self.plot_enrichment_dotplot(
+                                ora_neg, cond_label + ': Depleted Genes (n = ' + str(len(neg_df)) + ')',
+                                direction='depleted', div_id=enr_dep_div,
+                                input_genes=input_genes_neg)
+                            html.append(enr_html)
                         html.append('</div>')
                         # Enriched (positive beta)
-                        pos_df = df[df[beta_col] > 0].sort_values(fdr_col).head(self.enrichment_top_n)
-                        ora_pos = self._run_ora(pos_df['Gene'].tolist(), all_genes)
+                        pos_sig = df[(df[beta_col] > 0) & (df[fdr_col].astype(float) < self.enrichment_fdr)]
+                        pos_df = pos_sig.sort_values(fdr_col).head(self.enrichment_top_n)
                         html.append('<div>')
                         html.append(_desc_html('enrich_res'))
-                        enr_html, _ = self.plot_enrichment_dotplot(
-                            ora_pos, cond_label + ': Enriched Genes',
-                            direction='enriched', div_id=enr_enr_div)
-                        html.append(enr_html)
+                        if len(pos_df) == 0:
+                            html.append('<p class="plot-desc" style="color:#999;">No significant genes (FDR &lt; '
+                                        + str(self.enrichment_fdr) + ') with positive beta &mdash; ORA not run.</p>')
+                        else:
+                            ora_pos = self._run_ora(pos_df['Gene'].tolist(), all_genes)
+                            input_genes_pos = self._ora_input_meta(
+                                pos_df, 'Gene', [('FDR', fdr_col), ('Beta', beta_col)])
+                            enr_html, _ = self.plot_enrichment_dotplot(
+                                ora_pos, cond_label + ': Enriched Genes (n = ' + str(len(pos_df)) + ')',
+                                direction='enriched', div_id=enr_enr_div,
+                                input_genes=input_genes_pos)
+                            html.append(enr_html)
                         html.append('</div>')
                         html.append('</div>')
 
@@ -2185,33 +2584,56 @@ class MAGeCKHTMLReport:
     # ------------------------------------------------------------------
 
     def _embed_sgrna_data(self):
-        """Embed sgRNA data as log2 fold-change (centered at 0) for line plots."""
-        if self.count_df is None:
+        """Embed sgRNA data as log2 fold-change (centered at 0) for line plots.
+
+        Data is keyed per line plot (comparison section); each plot shows only
+        the samples actually compared in that section (RRA: the -t/-c samples;
+        MLE: the samples of the condition from the design matrix) and the
+        fold-change is centered on those samples. Falls back to all samples
+        when the compared samples are unknown.
+        """
+        if self.count_df is None or not self._lp_samples:
             return ''
         df = self.normalized_df if self.normalized_df is not None else self.count_df
-        genes_data = {}
-        for _, row in df.iterrows():
-            gene = str(row.get('Gene', 'Unknown'))
-            sgrna = str(row.get('sgRNA', ''))
-            vals = np.array([float(row[s]) if pd.notna(row[s]) else 0.0 for s in self.sample_names])
-            log_vals = np.log2(vals + 1)
-            mean_log = log_vals.mean()
-            lfc_vals = np.round(log_vals - mean_log, 1).tolist()
-            entry = [sgrna] + lfc_vals
-            if gene not in genes_data:
-                genes_data[gene] = []
-            genes_data[gene].append(entry)
+        data_by_lp = {}
+        samples_by_lp = {}
+        for lp_id, subset in self._lp_samples.items():
+            if not subset:
+                continue
+            samples_by_lp[lp_id] = subset
+            genes_data = {}
+            for _, row in df.iterrows():
+                gene = str(row.get('Gene', 'Unknown'))
+                sgrna = str(row.get('sgRNA', ''))
+                vals = np.array([float(row[s]) if pd.notna(row[s]) else 0.0
+                                 for s in subset])
+                log_vals = np.log2(vals + 1)
+                mean_log = log_vals.mean()
+                lfc_vals = np.round(log_vals - mean_log, 1).tolist()
+                entry = [sgrna] + lfc_vals
+                if gene not in genes_data:
+                    genes_data[gene] = []
+                genes_data[gene].append(entry)
+            data_by_lp[lp_id] = genes_data
         return ('<script>\n'
-                'var SGRNA_DATA=' + json.dumps(_json_safe(genes_data), separators=(',', ':')) + ';\n'
-                'var SAMPLE_NAMES=' + json.dumps(self.sample_names) + ';\n'
+                'var SGRNA_DATA=' + json.dumps(_json_safe(data_by_lp), separators=(',', ':')) + ';\n'
+                'var SAMPLE_NAMES=' + json.dumps(samples_by_lp) + ';\n'
                 'var selGenes={};\n'
                 '</script>\n')
 
     def _embed_enrichment_data(self):
-        """Embed enrichment ORA results as JSON for download."""
-        if not self._enrichment_store:
+        """Embed enrichment ORA results (and ORA input gene lists) as JSON
+        for the download buttons."""
+        if not self._enrichment_store and not self._enrichment_input:
             return ''
-        return ('<script>\nvar ENR_DATA=' + json.dumps(self._enrichment_store) + ';\n</script>\n')
+        out = ''
+        if self._enrichment_store:
+            out += ('<script>\nvar ENR_DATA=' + json.dumps(self._enrichment_store)
+                    + ';\n</script>\n')
+        if self._enrichment_input:
+            out += ('<script>\nvar ENR_INPUT=' + json.dumps(self._enrichment_input)
+                    + ';\n</script>\n')
+        return out
 
     def _embed_default_genes(self):
         """Embed default gene selections for line plots."""
@@ -2264,23 +2686,54 @@ class MAGeCKHTMLReport:
             except Exception:
                 logging.warning('Could not embed count table for download')
 
-        # Embed log files
+        # Embed log files — ONE combined log for the whole MAGeCK run (count step
+        # + every comparison), instead of one download button per log file.
+        # Genuine MAGeCK step logs start with 'Parameters: ...'; shell
+        # capture logs (e.g. mageck_run.log) are skipped.
         if self._log_files:
-            html.append('<h3>MAGeCK Log Files</h3>')
-            html.append('<p class="plot-desc">Log files containing the MAGeCK '
-                        'run commands and processing details.</p>')
-            html.append('<div class="download-section">')
+            mageck_logs = []
             for label, path in self._log_files:
                 try:
                     with open(path, 'r') as f:
-                        log_content = f.read()
-                    log_b64 = base64.b64encode(log_content.encode('utf-8')).decode('ascii')
-                    html.append('<a class="download-btn" href="data:text/plain;base64,'
-                                + log_b64 + '" download="' + label
-                                + '">Download ' + label + '</a>')
+                        first = f.readline()
                 except Exception:
-                    logging.warning('Could not embed log file: %s', path)
-            html.append('</div>')
+                    continue
+                if 'Parameters:' in first:
+                    mageck_logs.append((label, path))
+            if mageck_logs:
+                if len(mageck_logs) == 1:
+                    log_name, log_path = mageck_logs[0]
+                    try:
+                        with open(log_path, 'r') as f:
+                            log_text = f.read()
+                    except Exception:
+                        log_text = None
+                    log_sub = ''
+                else:
+                    log_name = 'mageck_run_combined.log'
+                    parts = ['#' * 74,
+                             '# MAGeCK RUN LOG - combined (all steps and comparisons)',
+                             '#' * 74]
+                    for label, path in mageck_logs:
+                        parts.append('')
+                        parts.append('--- STEP LOG: ' + label + ' ' + '-' * 46)
+                        try:
+                            with open(path, 'r') as f:
+                                parts.append(f.read().rstrip('\n'))
+                        except Exception:
+                            parts.append('(unreadable: ' + path + ')')
+                    log_text = '\n'.join(parts) + '\n'
+                    log_sub = ' (combined: count step + all comparisons)'
+                if log_text is not None:
+                    log_b64 = base64.b64encode(log_text.encode('utf-8')).decode('ascii')
+                    html.append('<h3>MAGeCK Log</h3>')
+                    html.append('<p class="plot-desc">The MAGeCK run log' + log_sub
+                                + ' containing the run commands and processing details.</p>')
+                    html.append('<div class="download-section">')
+                    html.append('<a class="download-btn" href="data:text/plain;base64,'
+                                + log_b64 + '" download="' + log_name
+                                + '">Download ' + log_name + '</a>')
+                    html.append('</div>')
 
         # Embed countsummary if available
         if self.countsummary_df is not None:
@@ -2383,7 +2836,8 @@ for(var _i=0;_i<_RAW.v.length;_i++){var _o={};for(var _j=0;_j<_RAW.k.length;_j++
 _RAW=null; /* Free memory */
 window["TD_"+TID]=DATA;window["TC_"+TID]=COLS;
 var flt=DATA.slice(),sKey="",sAsc=true,pg=0,ps=50;
-function fv(v,f){if(v==null||v===undefined)return"";if(f=="s")return v;if(f=="d")return Math.round(Number(v)).toLocaleString();if(f==".2e")return Number(v).toExponential(2);if(f==".4f")return Number(v).toFixed(4);return String(v);}
+/* Cells are raw file tokens: display them VERBATIM (no reformatting) */
+function fv(v,f){if(v==null||v===undefined||v==="")return"";return v;}
 function ren(){
 var tb=document.querySelector("#tbl-"+TID+" tbody");
 var s2=ps>0?pg*ps:0,e2=ps>0?Math.min(s2+ps,flt.length):flt.length,h="";
@@ -2403,12 +2857,12 @@ var ev2=parseFloat(document.getElementById("eff-"+TID).value);if(isNaN(ev2))ev2=
 var sv=document.getElementById("search-"+TID).value.toLowerCase();
 ps=parseInt(document.getElementById("psize-"+TID).value)||0;
 flt=DATA.filter(function(r){
-var pf=true;if(fv2<1){pf=false;for(var k=0;k<FKEYS.length;k++){if(r[FKEYS[k]]!=null&&r[FKEYS[k]]<=fv2){pf=true;break;}}}
-if(ev2>0&&EK&&r[EK]!=null){if(Math.abs(r[EK])<ev2)pf=false;}
+var pf=true;if(fv2<1){pf=false;for(var k=0;k<FKEYS.length;k++){var _tv=r[FKEYS[k]];if(_tv!=null&&_tv!==""){var _nv=Number(_tv);if(!isNaN(_nv)&&_nv<=fv2){pf=true;break;}}}}
+if(ev2>0&&EK&&r[EK]!=null&&r[EK]!==""){var _ev=Number(r[EK]);if(!isNaN(_ev)&&Math.abs(_ev)<ev2)pf=false;}
 var ps2=!sv||!r[GK]||r[GK].toLowerCase().indexOf(sv)>=0;
 return pf&&ps2;});
 if(sKey)ds();pg=0;ren();}
-function ds(){flt.sort(function(a,b){var va=a[sKey],vb=b[sKey];if(va==null)return 1;if(vb==null)return-1;var d=typeof va==="number"?va-vb:String(va).localeCompare(String(vb));return sAsc?d:-d;});}
+function ds(){flt.sort(function(a,b){var va=a[sKey],vb=b[sKey];if(va==null||va==="")return 1;if(vb==null||vb==="")return-1;var na=Number(va),nb=Number(vb);var d=(!isNaN(na)&&!isNaN(nb))?na-nb:String(va).localeCompare(String(vb));return sAsc?d:-d;});}
 /* Expose for external sync from volcano */
 window["AF_"+TID]=af;
 window["FLT_"+TID]=function(){return flt;};
@@ -2567,12 +3021,16 @@ function drawVolcano(divId){
  if(D.top_dep){for(var j=0;j<D.top_dep.length;j++){var k=D.top_dep[j];anns.push({x:D.lfc[k],y:D.y[k],text:D.g[k],showarrow:true,arrowhead:0,arrowcolor:"rgba(52,152,219,0.4)",ax:-18-(j%3)*12,ay:-8-(Math.floor(j/3)%7)*11,font:{size:7,color:"#2166AC"},bgcolor:"rgba(255,255,255,0.7)"});}}
  Plotly.react(divId,[ns,sd,se],{title:{text:D.title,font:{size:13}},xaxis:{title:D.xl,automargin:true,tickfont:{size:10}},yaxis:{title:D.yl,automargin:true,tickfont:{size:10}},legend:{font:{size:10}},height:450,margin:{t:45,b:45,l:55,r:15},shapes:shapes,annotations:anns},CONFIG);
  /* Table has its own independent FDR filter (no sync from volcano) */
- /* Update linked enrichment dot plots */
- if(D.ediv&&typeof HALLMARK_SETS!=="undefined"){updateEnrichment(D.ediv,depGenes,D.g.length,"depleted");}
- if(D.eenr&&typeof HALLMARK_SETS!=="undefined"){updateEnrichment(D.eenr,enrGenes,D.g.length,"enriched");}
+ /* Update linked enrichment dot plots — only after the user changes the
+     cutoff sliders, so the server-rendered ORA (top-ranked significant
+     genes) is what's shown on initial load */
+ if(window["VT_"+divId]&&D.ediv&&typeof HALLMARK_SETS!=="undefined"){updateEnrichment(D.ediv,depGenes,D.g.length,"depleted",fc,ec);}
+ if(window["VT_"+divId]&&D.eenr&&typeof HALLMARK_SETS!=="undefined"){updateEnrichment(D.eenr,enrGenes,D.g.length,"enriched",fc,ec);}
 }
-/* Client-side enrichment recomputation */
-function updateEnrichment(divId,geneList,totalGenes,direction){
+/* Marked when the user interacts with a volcano's cutoff sliders */
+function vTouched(id){window["VT_"+id]=true;}
+/* Client-side enrichment recomputation (approximate; uses the volcano-selected gene list) */
+function updateEnrichment(divId,geneList,totalGenes,direction,fc,ec){
  if(!document.getElementById(divId))return;
  if(!geneList||geneList.length===0){Plotly.react(divId,[],{title:{text:"No significant genes at current cutoffs"},height:270,margin:{t:40,b:20,l:10,r:10}},CONFIG);return;}
  var gs=new Set(geneList),nSig=geneList.length,results=[];
@@ -2621,7 +3079,7 @@ function updateEnrichment(divId,geneList,totalGenes,direction){
  var pH=Math.max(270,show.length*24+100);
  var anns2=[];
  if(refV.length>0){anns2.push({text:"<b>-log\u2081\u2080(p)</b>",xref:"x2 domain",yref:"y2 domain",x:0.5,y:1.15,showarrow:false,font:{size:8,color:"#555"}});}
- var ttl=(direction==="depleted"?"Depleted":"Enriched")+" Genes: Hallmark Pathways (n="+geneList.length+")";
+ var ttl=(direction==="depleted"?"Depleted":"Enriched")+" Genes: Hallmark Pathways (n="+geneList.length+"; FDR \u2264 "+fc+", |LFC| \u2265 "+ec+" \u2014 volcano selection, approximate ORA)";
  Plotly.react(divId,traces,{title:{text:ttl,font:{size:12},y:0.98,yanchor:"top",pad:{t:10}},
   xaxis:{title:"Fold Enrichment",automargin:true,tickfont:{size:9},domain:[0,0.78]},
   yaxis:{automargin:true,tickfont:{size:9},domain:[0,1.0]},
@@ -2741,12 +3199,15 @@ function updLP(lpId){
  if(!gs||gs.size===0){Plotly.react(lpId,[],{title:{text:"Click genes in the table to show sgRNA log2 FC"},xaxis:{title:"Sample"},yaxis:{title:"log2 Fold Change",zeroline:true},height:380});return;}
  if(typeof SGRNA_DATA==="undefined")return;
  var traces=[],colors=["#E74C3C","#3498DB","#2ECC71","#9B59B6","#F39C12","#1ABC9C","#E67E22","#34495E","#16A085","#C0392B"],ci=0;
+ var byGene=SGRNA_DATA[lpId]||{};
+ var xs=(typeof SAMPLE_NAMES!=="undefined")?(SAMPLE_NAMES[lpId]||[]):null;
+ if(!xs)return;
  gs.forEach(function(gene){
-  var sgs=SGRNA_DATA[gene];if(!sgs)return;
+  var sgs=byGene[gene];if(!sgs)return;
   for(var k=0;k<sgs.length;k++){
    var sg=sgs[k],y=[];
    for(var m=1;m<sg.length;m++)y.push(sg[m]);
-   traces.push({x:SAMPLE_NAMES,y:y,mode:"lines+markers",name:gene+" - "+sg[0],line:{color:colors[ci%colors.length]},marker:{size:5},legendgroup:gene,
+   traces.push({x:xs,y:y,mode:"lines+markers",name:gene+" - "+sg[0],line:{color:colors[ci%colors.length]},marker:{size:5},legendgroup:gene,
     hovertemplate:"Gene: "+gene+"<br>sgRNA: "+sg[0]+"<br>Sample: %{x}<br>LFC: %{y:.2f}"});
   }
   ci++;
@@ -2786,12 +3247,14 @@ function initDefaults(){
  },200);
 }
 initDefaults();
+/* Quote a CSV field only when needed (values are raw file tokens) */
+function csvq(v){if(v==null)return"";var s=String(v);if(/[",\n]/.test(s))return'"'+s.replace(/"/g,'""')+'"';return s;}
 /* CSV download from table data (all rows) */
 function downloadCSV(tableId,filename){
  var data=window["TD_"+tableId],cols=window["TC_"+tableId];
  if(!data||!cols)return;
- var lines=[cols.map(function(c){return'"'+c.label+'"';}).join(",")];
- data.forEach(function(r){lines.push(cols.map(function(c){var v=r[c.key];if(v==null)return"";if(typeof v==="string")return'"'+v.replace(/"/g,'""')+'"';return String(v);}).join(","));});
+ var lines=[cols.map(function(c){return csvq(c.label);}).join(",")];
+ data.forEach(function(r){lines.push(cols.map(function(c){return csvq(r[c.key]);}).join(","));});
  var blob=new Blob([lines.join("\n")],{type:"text/csv;charset=utf-8;"});
  var url=URL.createObjectURL(blob);
  var a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
@@ -2802,8 +3265,8 @@ function downloadFilteredCSV(tableId,filename){
  if(!fn)return downloadCSV(tableId,filename);
  var data=fn(),cols=window["TC_"+tableId];
  if(!data||!cols)return;
- var lines=[cols.map(function(c){return'"'+c.label+'"';}).join(",")];
- data.forEach(function(r){lines.push(cols.map(function(c){var v=r[c.key];if(v==null)return"";if(typeof v==="string")return'"'+v.replace(/"/g,'""')+'"';return String(v);}).join(","));});
+ var lines=[cols.map(function(c){return csvq(c.label);}).join(",")];
+ data.forEach(function(r){lines.push(cols.map(function(c){return csvq(r[c.key]);}).join(","));});
  var blob=new Blob([lines.join("\n")],{type:"text/csv;charset=utf-8;"});
  var url=URL.createObjectURL(blob);
  var a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
@@ -2821,6 +3284,18 @@ function dlEnr(key,filename){
   if(hasGenes){line+=","+(r.Overlap_Count!=null?r.Overlap_Count:"")+","+(r.Pathway_Size!=null?r.Pathway_Size:"")+","+(r.Fold_Enrichment!=null?r.Fold_Enrichment:"")+",\""+(r.Genes||"").replace(/"/g,'""')+"\"";}
   lines.push(line);
  });
+ var blob=new Blob([lines.join("\n")],{type:"text/csv;charset=utf-8;"});
+ var url=URL.createObjectURL(blob);
+ var a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+}
+/* ORA input-gene CSV download — the EXACT genes fed to ORA for this plot */
+function dlEnrGenes(key,filename){
+ if(typeof ENR_INPUT==="undefined"||!ENR_INPUT[key])return;
+ var g=ENR_INPUT[key].genes;
+ if(!g||g.length===0)return;
+ var keys=Object.keys(g[0]);
+ var lines=[keys.map(csvq).join(",")];
+ g.forEach(function(r){lines.push(keys.map(function(k){return csvq(r[k]);}).join(","));});
  var blob=new Blob([lines.join("\n")],{type:"text/csv;charset=utf-8;"});
  var url=URL.createObjectURL(blob);
  var a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
@@ -2858,5 +3333,8 @@ def mageck_report_main(args):
         organism=getattr(args, 'organism', 'human'),
         skip_enrichment=getattr(args, 'skip_enrichment', False),
         enrichment_fdr=getattr(args, 'enrichment_fdr', 0.05),
+        library_file=getattr(args, 'library', None),
+        comparison_tokens=_flatten_tokens(getattr(args, 'treatment', None),
+                                          getattr(args, 'control', None)),
     )
     report.generate_report(output_file=getattr(args, 'output_file', None))

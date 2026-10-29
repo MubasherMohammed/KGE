@@ -1,0 +1,19 @@
+name: mageckenv
+channels:
+  - conda-forge
+  - bioconda
+  - bih-cubi
+  - defaults
+dependencies:
+  - python=3.11
+  - mageck=0.5.9.5
+  - bcl2fastq2
+  - decoupler-py
+  - matplotlib
+  - seaborn
+  - adjusttext
+  - ipykernel
+  - pip
+  - pip:
+    - plotly>=6.0
+    - pydeseq2>=0.5

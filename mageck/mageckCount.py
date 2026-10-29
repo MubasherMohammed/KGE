@@ -581,7 +581,8 @@ def mageckcount_main(args):
   # HTML report
   if hasattr(args,'html_report') and args.html_report:
     from mageck.htmlReport import MAGeCKHTMLReport
-    _report=MAGeCKHTMLReport(output_prefix=args.output_prefix)
+    _report=MAGeCKHTMLReport(output_prefix=args.output_prefix,
+                             library_file=getattr(args,'list_seq',None))
     _report.generate_report()
   return 0
 

@@ -88,6 +88,7 @@ def arg_test(subparser):
   gengroup.add_argument('--remove-zero-threshold',type=float,default=0.0,help='sgRNA normalized count threshold to be considered removed in the --remove-zero option. Default 0.')
   gengroup.add_argument('--pdf-report',action='store_true',help='Generate pdf report of the analysis.')
   gengroup.add_argument('--html-report',action='store_true',help='Generate a self-contained HTML report after analysis.')
+  gengroup.add_argument('--library',help='Path to the sgRNA library file used for matching (recorded with a download link in the HTML report).')
   gengroup.add_argument('--gene-lfc-method',choices=['median','alphamedian','mean','alphamean','secondbest'],help='Method to calculate gene log2 fold changes (LFC) from sgRNA LFCs. Available methods include the median/mean of all sgRNAs (median/mean), or the median/mean sgRNAs that are ranked in front of the alpha cutoff in RRA (alphamedian/alphamean), or the sgRNA that has the second strongest LFC (secondbest). In the alphamedian/alphamean case, the number of sgRNAs correspond to the "goodsgrna" column in the output, and the gene LFC will be set to 0 if no sgRNA is in front of the alpha cutoff. Default median.',default='median')
   ## Optional IO arguments
   iogroup=subn_stattest.add_argument_group(title='Optional arguments for input and output',description='')
@@ -211,6 +212,9 @@ def arg_report(subparser):
   iogroup.add_argument('--gene-summary',nargs='+',help='One or more gene_summary.txt files (RRA or MLE). If not provided, auto-detected.')
   iogroup.add_argument('--sgrna-summary',nargs='+',help='One or more sgrna_summary.txt files. If not provided, auto-detected.')
   iogroup.add_argument('--design-matrix',help='Path to the design matrix file (for MLE reports).')
+  iogroup.add_argument('--library',help='Path to the sgRNA library file used for matching (shown in the report with a download link).')
+  iogroup.add_argument('--treatment',help='Comma-separated sample labels/indices of the treatment side of the RRA comparison (restricts the sgRNA line plots to the compared samples).')
+  iogroup.add_argument('--control',help='Comma-separated sample labels/indices of the control side of the RRA comparison.')
   iogroup.add_argument('--norm-method',choices=['none','median','total'],default='median',help='Normalization method for QC plots. Default: median.')
   # optional output
   outgroup=subp_report.add_argument_group(title='Optional output arguments',description='')
