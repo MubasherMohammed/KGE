@@ -1762,6 +1762,10 @@ class MAGeCKHTMLReport:
 
         neg_log_p = (-np.log10(show['padj'].clip(1e-300, 1.0))).tolist()
         max_nlp = max(neg_log_p) if neg_log_p else 1
+        if max_nlp <= 0:
+            # All pathways at chance level (padj == 1.0 -> -log10 == 0):
+            # render dots at minimum size instead of dividing by zero.
+            max_nlp = 1
         min_nlp = min(neg_log_p) if neg_log_p else 0
         sizes = [max(8, v / max_nlp * 28) for v in neg_log_p]
 
